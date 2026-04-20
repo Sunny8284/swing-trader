@@ -207,6 +207,58 @@ def get_stats():
         }
 
 
+_backtest_cache: dict = {}   # {days: (timestamp, result)}
+_BACKTEST_TTL = 3600         # reuse cached result for 1 hour
+
+
+@app.get("/api/backtest")
+def get_backtest(days: int = 365, refresh: bool = False):
+    """Run (or return cached) backtest over the last `days` calendar days."""
+    import time
+    from backtest.engine import run as bt_run
+
+    cached = _backtest_cache.get(days)
+    if cached and not refresh and (time.time() - cached[0]) < _BACKTEST_TTL:
+        return cached[1]
+
+    try:
+        result = bt_run(days=days)
+        payload = {
+            "start_date":        str(result.start_date),
+            "end_date":          str(result.end_date),
+            "initial_capital":   result.initial_capital,
+            "final_capital":     result.final_capital,
+            "total_return_pct":  result.total_return_pct,
+            "spy_return_pct":    result.spy_return_pct,
+            "total_trades":      result.total_trades,
+            "wins":              result.wins,
+            "losses":            result.losses,
+            "win_rate":          result.win_rate,
+            "avg_pnl":           result.avg_pnl,
+            "max_drawdown_pct":  result.max_drawdown_pct,
+            "sharpe_ratio":      result.sharpe_ratio,
+            "equity_curve":      result.equity_curve,
+            "trades": [
+                {
+                    "ticker":       t.ticker,
+                    "entry_date":   str(t.entry_date),
+                    "exit_date":    str(t.exit_date),
+                    "entry_price":  t.entry_price,
+                    "exit_price":   t.exit_price,
+                    "pnl":          t.pnl,
+                    "pnl_pct":      t.pnl_pct,
+                    "exit_reason":  t.exit_reason,
+                }
+                for t in result.trades
+            ],
+        }
+        _backtest_cache[days] = (time.time(), payload)
+        return payload
+    except Exception as e:
+        logger.error(f"Backtest failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
