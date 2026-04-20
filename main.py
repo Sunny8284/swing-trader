@@ -23,6 +23,7 @@ from data import fetcher
 from signals import generator
 from agent.trader import TradingAgent
 from agent import reasoner as ai_reasoner
+from agent import notifier
 
 # ── Logging setup ──────────────────────────────────────────────────────────────
 
@@ -74,6 +75,7 @@ def run_trading_cycle(watchlist: list[str] | None = None) -> None:
             reasoning = ai_reasoner.explain(result)
             if reasoning:
                 storage.update_reasoning(record.id, reasoning)
+                result._reasoning = reasoning
 
     # Print a clean signal summary to the console
     _print_signal_table(signal_results)
@@ -83,9 +85,20 @@ def run_trading_cycle(watchlist: list[str] | None = None) -> None:
     agent = TradingAgent()
     actions = agent.run_cycle(signal_results)
 
-    # ── Step 4: Log results ────────────────────────────────────────────────────
+    # ── Step 4: Log results + notify ──────────────────────────────────────────
     logger.info("Step 4/4 — Logging results...")
     _print_action_summary(actions)
+
+    try:
+        from api.alpaca_client import trading_client
+        acct = trading_client.get_account()
+        account_data = {
+            "portfolio_value": float(acct.portfolio_value or 0),
+            "cash": float(acct.cash or 0),
+        }
+    except Exception:
+        account_data = None
+    notifier.send_cycle_summary(signal_results, actions, account=account_data)
 
     logger.info("Trading cycle complete.")
     logger.info("=" * 60)
