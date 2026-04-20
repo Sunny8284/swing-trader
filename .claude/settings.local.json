@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc -l \"/Users/nithun/Documents/Swing trader\"/*.py \"/Users/nithun/Documents/Swing trader\"/*.txt \"/Users/nithun/Documents/Swing trader\"/.env)",
+      "Bash(venv/bin/pip install:*)",
+      "Bash(venv/bin/python test_alpaca_connection.py)",
+      "Bash(venv/bin/python3 -c ':*)",
+      "Read(//Users/nithun/swing-trader-dashboard/src/app/**)",
+      "Read(//Users/nithun/swing-trader-dashboard/app/**)",
+      "Bash(npm run *)",
+      "Bash(rm ~/swing-trader-dashboard/app/layout.js ~/swing-trader-dashboard/app/page.js)",
+      "Bash(rmdir ~/swing-trader-dashboard/app)",
+      "Bash(rm -rf ~/swing-trader-dashboard/.next)",
+      "Bash(curl -sv http://localhost:3000)",
+      "Bash(kill 25668)",
+      "Bash(mkdir -p ~/swing-trader-dashboard/app)",
+      "Bash(pkill -f \"next dev\")",
+      "Bash(curl *)",
+      "Bash(python3 -m json.tool)",
+      "Bash(python3 -c ' *)",
+      "Bash(launchctl list *)",
+      "Bash(git status *)",
+      "Bash(ls .gitignore)",
+      "Bash(git init *)",
+      "Bash(git add *)"
+    ]
+  }
+}
