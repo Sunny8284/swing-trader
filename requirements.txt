@@ -27,8 +27,8 @@ apscheduler>=3.10.0
 # HTTP
 requests>=2.31.0
 
-# Claude AI reasoning
-anthropic>=0.49.0
+# Groq AI reasoning (free tier)
+groq>=0.9.0
 
 # Testing
 pytest>=7.4.0
