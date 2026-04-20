@@ -65,11 +65,18 @@ class BacktestResult:
 
 # ── Signal computation (vectorised, causal) ────────────────────────────────────
 
-def _compute_signals(df: pd.DataFrame) -> pd.DataFrame:
+def _compute_signals(df: pd.DataFrame, params: dict | None = None) -> pd.DataFrame:
     """
     Compute daily BUY/SELL/HOLD signals for the entire DataFrame at once.
     All indicators are causal — no look-ahead bias.
+    `params` overrides config values for optimizer sweeps.
     """
+    p = params or {}
+    buy_threshold  = p.get("buy_threshold",  config.SIGNAL_BUY_THRESHOLD)
+    sell_threshold = p.get("sell_threshold", config.SIGNAL_SELL_THRESHOLD)
+    rsi_oversold   = p.get("rsi_oversold",   config.RSI_OVERSOLD)
+    rsi_overbought = p.get("rsi_overbought", config.RSI_OVERBOUGHT)
+
     close = df["Close"].squeeze()
 
     rsi = ta.momentum.RSIIndicator(close=close, window=config.RSI_PERIOD).rsi()
@@ -89,27 +96,24 @@ def _compute_signals(df: pd.DataFrame) -> pd.DataFrame:
     sma50  = ta.trend.SMAIndicator(close=close, window=config.SMA_LONG).sma_indicator()
     sma200 = ta.trend.SMAIndicator(close=close, window=config.SMA_TREND).sma_indicator()
 
-    bb     = ta.volatility.BollingerBands(close=close, window=config.BOLLINGER_PERIOD, window_dev=config.BOLLINGER_STD)
-    bb_hi  = bb.bollinger_hband()
-    bb_lo  = bb.bollinger_lband()
+    bb    = ta.volatility.BollingerBands(close=close, window=config.BOLLINGER_PERIOD, window_dev=config.BOLLINGER_STD)
+    bb_hi = bb.bollinger_hband()
+    bb_lo = bb.bollinger_lband()
 
-    # Composite score
     score = pd.Series(0, index=close.index, dtype=int)
-    score += (rsi < config.RSI_OVERSOLD).astype(int)
-    score -= (rsi > config.RSI_OVERBOUGHT).astype(int)
-    score += ((macd_prev <= sig_prev) & (macd_line > signal_line)).astype(int)   # bullish cross
-    score -= ((macd_prev >= sig_prev) & (macd_line < signal_line)).astype(int)   # bearish cross
+    score += (rsi < rsi_oversold).astype(int)
+    score -= (rsi > rsi_overbought).astype(int)
+    score += ((macd_prev <= sig_prev) & (macd_line > signal_line)).astype(int)
+    score -= ((macd_prev >= sig_prev) & (macd_line < signal_line)).astype(int)
     score += (sma20 > sma50).astype(int)
     score -= (sma20 <= sma50).astype(int)
     score += (close < bb_lo).astype(int)
     score -= (close > bb_hi).astype(int)
 
-    # Raw signal from score
     sig = pd.Series("HOLD", index=close.index)
-    sig[score >= config.SIGNAL_BUY_THRESHOLD]  = "BUY"
-    sig[score <= config.SIGNAL_SELL_THRESHOLD] = "SELL"
+    sig[score >= buy_threshold]  = "BUY"
+    sig[score <= sell_threshold] = "SELL"
 
-    # SMA200 trend filter
     sig[(sig == "BUY")  & (close <= sma200)] = "HOLD"
     sig[(sig == "SELL") & (close >= sma200)] = "HOLD"
 
@@ -127,6 +131,7 @@ def run(
     tickers: list[str] | None = None,
     days: int = 365,
     initial_capital: float = 100_000.0,
+    params: dict | None = None,
 ) -> BacktestResult:
     """
     Run a walk-forward backtest over the last `days` calendar days.
@@ -155,12 +160,11 @@ def run(
             if len(tickers) == 1:
                 df = raw.copy()
             else:
-                # MultiIndex columns: (Price, Ticker)
                 df = raw.xs(ticker, axis=1, level="Ticker").dropna(how="all")
             if df.empty or len(df) < 60:
                 logger.warning("Skipping %s — insufficient data", ticker)
                 continue
-            signals[ticker] = _compute_signals(df)
+            signals[ticker] = _compute_signals(df, params)
         except Exception as e:
             logger.warning("Signal computation failed for %s: %s", ticker, e)
 
@@ -181,6 +185,11 @@ def run(
     # SPY benchmark (buy-and-hold)
     spy_return_pct = _spy_benchmark(raw, all_dates, len(tickers))
 
+    # Resolve risk params (allow override for optimizer)
+    p             = params or {}
+    stop_loss     = p.get("stop_loss_pct",   config.STOP_LOSS_PCT)
+    take_profit   = p.get("take_profit_pct", config.TAKE_PROFIT_PCT)
+
     # Portfolio simulation
     capital   = initial_capital
     positions: dict[str, dict] = {}  # ticker → {qty, entry_price, entry_date}
@@ -200,12 +209,12 @@ def run(
             sig   = signals[ticker].loc[ts, "signal"]
 
             exit_reason = None
-            if pnl_pct <= -config.STOP_LOSS_PCT:
+            if pnl_pct <= -stop_loss:
                 exit_reason = "stop_loss"
-                price = pos["entry_price"] * (1 - config.STOP_LOSS_PCT)  # fill at stop
-            elif pnl_pct >= config.TAKE_PROFIT_PCT:
+                price = pos["entry_price"] * (1 - stop_loss)
+            elif pnl_pct >= take_profit:
                 exit_reason = "take_profit"
-                price = pos["entry_price"] * (1 + config.TAKE_PROFIT_PCT)
+                price = pos["entry_price"] * (1 + take_profit)
             elif sig == "SELL":
                 exit_reason = "sell_signal"
 
@@ -306,6 +315,166 @@ def run(
         trades=trades,
         equity_curve=equity_curve,
         spy_return_pct=spy_return_pct,
+    )
+
+
+def fetch_raw_data(tickers: list[str], days: int = 365) -> object:
+    """Download OHLCV data once; reuse across many optimizer runs."""
+    end_dt      = datetime.now()
+    fetch_start = end_dt - timedelta(days=days + WARMUP_DAYS + 60)
+    return yf.download(
+        tickers,
+        start=fetch_start.strftime("%Y-%m-%d"),
+        end=end_dt.strftime("%Y-%m-%d"),
+        auto_adjust=True,
+        progress=False,
+    )
+
+
+def run_with_data(
+    raw,
+    tickers: list[str],
+    days: int = 365,
+    initial_capital: float = 100_000.0,
+    params: dict | None = None,
+) -> BacktestResult:
+    """Same as run() but accepts pre-downloaded raw data — for the optimizer."""
+    signals: dict[str, pd.DataFrame] = {}
+    for ticker in tickers:
+        try:
+            df = raw.xs(ticker, axis=1, level="Ticker").dropna(how="all") if len(tickers) > 1 else raw.copy()
+            if df.empty or len(df) < 60:
+                continue
+            signals[ticker] = _compute_signals(df, params)
+        except Exception as e:
+            logger.debug("Signal failed %s: %s", ticker, e)
+
+    if not signals:
+        raise RuntimeError("No signal data.")
+
+    end_dt          = datetime.now()
+    backtest_start  = end_dt - timedelta(days=days)
+    all_dates       = sorted({
+        d for df in signals.values()
+        for d in df.index
+        if pd.Timestamp(d) >= pd.Timestamp(backtest_start)
+    })
+
+    if not all_dates:
+        raise RuntimeError("No trading days in window.")
+
+    p           = params or {}
+    stop_loss   = p.get("stop_loss_pct",   config.STOP_LOSS_PCT)
+    take_profit = p.get("take_profit_pct", config.TAKE_PROFIT_PCT)
+
+    capital   = initial_capital
+    positions: dict[str, dict] = {}
+    trades: list[Trade] = []
+    equity_curve = []
+
+    for dt in all_dates:
+        ts = pd.Timestamp(dt)
+
+        for ticker in list(positions.keys()):
+            if ticker not in signals or ts not in signals[ticker].index:
+                continue
+            pos     = positions[ticker]
+            price   = float(signals[ticker].loc[ts, "price"])
+            pnl_pct = (price - pos["entry_price"]) / pos["entry_price"]
+            sig     = signals[ticker].loc[ts, "signal"]
+
+            exit_reason = None
+            if pnl_pct <= -stop_loss:
+                exit_reason = "stop_loss"
+                price = pos["entry_price"] * (1 - stop_loss)
+            elif pnl_pct >= take_profit:
+                exit_reason = "take_profit"
+                price = pos["entry_price"] * (1 + take_profit)
+            elif sig == "SELL":
+                exit_reason = "sell_signal"
+
+            if exit_reason:
+                proceeds = price * pos["qty"]
+                capital += proceeds
+                pnl      = proceeds - pos["entry_price"] * pos["qty"]
+                trades.append(Trade(
+                    ticker=ticker,
+                    entry_date=pos["entry_date"],
+                    exit_date=dt.date() if hasattr(dt, "date") else dt,
+                    entry_price=pos["entry_price"],
+                    exit_price=price,
+                    qty=pos["qty"],
+                    pnl=round(pnl, 2),
+                    pnl_pct=round(pnl_pct * 100, 2),
+                    exit_reason=exit_reason,
+                ))
+                del positions[ticker]
+
+        for ticker, sig_df in signals.items():
+            if ticker in positions or ts not in sig_df.index:
+                continue
+            if sig_df.loc[ts, "signal"] != "BUY":
+                continue
+            price          = float(sig_df.loc[ts, "price"])
+            position_value = initial_capital * config.MAX_POSITION_PCT
+            if capital - position_value < initial_capital * config.MIN_CASH_RESERVE_PCT:
+                continue
+            qty      = position_value / price
+            capital -= position_value
+            positions[ticker] = {
+                "qty": qty, "entry_price": price,
+                "entry_date": dt.date() if hasattr(dt, "date") else dt,
+            }
+
+        pos_value = sum(
+            positions[t]["qty"] * float(signals[t].loc[ts, "price"])
+            for t in positions if t in signals and ts in signals[t].index
+        )
+        equity_curve.append({"date": ts.strftime("%Y-%m-%d"), "equity": round(capital + pos_value, 2)})
+
+    for ticker, pos in positions.items():
+        sig_df  = signals[ticker]
+        last_ts = sig_df.index[-1]
+        price   = float(sig_df.loc[last_ts, "price"])
+        proceeds = price * pos["qty"]
+        capital += proceeds
+        pnl      = proceeds - pos["entry_price"] * pos["qty"]
+        pnl_pct  = (price - pos["entry_price"]) / pos["entry_price"]
+        trades.append(Trade(
+            ticker=ticker,
+            entry_date=pos["entry_date"],
+            exit_date=last_ts.date() if hasattr(last_ts, "date") else last_ts,
+            entry_price=pos["entry_price"],
+            exit_price=price,
+            qty=pos["qty"],
+            pnl=round(pnl, 2),
+            pnl_pct=round(pnl_pct * 100, 2),
+            exit_reason="end_of_backtest",
+        ))
+
+    wins       = [t for t in trades if t.pnl > 0]
+    losses     = [t for t in trades if t.pnl <= 0]
+    total_pnl  = sum(t.pnl for t in trades)
+    win_rate   = round(len(wins) / len(trades) * 100, 1) if trades else 0.0
+    avg_pnl    = round(total_pnl / len(trades), 2) if trades else 0.0
+    total_ret  = round((capital - initial_capital) / initial_capital * 100, 2)
+
+    return BacktestResult(
+        start_date=all_dates[0].date() if hasattr(all_dates[0], "date") else all_dates[0],
+        end_date=all_dates[-1].date() if hasattr(all_dates[-1], "date") else all_dates[-1],
+        initial_capital=initial_capital,
+        final_capital=round(capital, 2),
+        total_return_pct=total_ret,
+        total_trades=len(trades),
+        wins=len(wins),
+        losses=len(losses),
+        win_rate=win_rate,
+        avg_pnl=avg_pnl,
+        max_drawdown_pct=_max_drawdown(equity_curve),
+        sharpe_ratio=_sharpe(equity_curve),
+        trades=trades,
+        equity_curve=equity_curve,
+        spy_return_pct=0.0,
     )
 
 

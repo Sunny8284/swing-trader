@@ -207,7 +207,8 @@ def get_stats():
         }
 
 
-_backtest_cache: dict = {}   # {days: (timestamp, result)}
+_backtest_cache: dict  = {}   # {days: (timestamp, result)}
+_optimize_cache: dict = {}   # {days: (timestamp, results)}
 _BACKTEST_TTL = 3600         # reuse cached result for 1 hour
 
 
@@ -256,6 +257,40 @@ def get_backtest(days: int = 365, refresh: bool = False):
         return payload
     except Exception as e:
         logger.error(f"Backtest failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/optimize")
+def get_optimize(days: int = 365, refresh: bool = False):
+    """Grid-search over strategy parameters; returns results ranked by Sharpe."""
+    import time
+    from backtest.optimizer import run_optimization
+
+    cached = _optimize_cache.get(days)
+    if cached and not refresh and (time.time() - cached[0]) < _BACKTEST_TTL:
+        return cached[1]
+
+    try:
+        results = run_optimization(days=days)
+        payload = [
+            {
+                "buy_threshold":    r.buy_threshold,
+                "take_profit_pct":  r.take_profit_pct,
+                "stop_loss_pct":    r.stop_loss_pct,
+                "total_return_pct": r.total_return_pct,
+                "win_rate":         r.win_rate,
+                "total_trades":     r.total_trades,
+                "sharpe_ratio":     r.sharpe_ratio,
+                "max_drawdown_pct": r.max_drawdown_pct,
+                "avg_pnl":          r.avg_pnl,
+                "is_current":       r.is_current,
+            }
+            for r in results
+        ]
+        _optimize_cache[days] = (time.time(), payload)
+        return payload
+    except Exception as e:
+        logger.error(f"Optimization failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
