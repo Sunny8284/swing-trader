@@ -67,10 +67,10 @@ def run_trading_cycle(watchlist: list[str] | None = None) -> None:
     signal_results = generator.generate_signals(data)
 
     # Save every signal to DB, then attach Claude reasoning
-    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    groq_key = os.environ.get("GROQ_API_KEY", "")
     for result in signal_results:
         record = storage.save_signal(result)
-        if anthropic_key:
+        if groq_key:
             reasoning = ai_reasoner.explain(result)
             if reasoning:
                 storage.update_reasoning(record.id, reasoning)
