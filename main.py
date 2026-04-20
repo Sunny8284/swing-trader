@@ -22,6 +22,7 @@ from db import storage
 from data import fetcher
 from signals import generator
 from agent.trader import TradingAgent
+from agent import reasoner as ai_reasoner
 
 # ── Logging setup ──────────────────────────────────────────────────────────────
 
@@ -65,9 +66,14 @@ def run_trading_cycle(watchlist: list[str] | None = None) -> None:
     logger.info("Step 2/4 — Generating signals...")
     signal_results = generator.generate_signals(data)
 
-    # Save every signal to DB for history tracking
+    # Save every signal to DB, then attach Claude reasoning
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
     for result in signal_results:
-        storage.save_signal(result)
+        record = storage.save_signal(result)
+        if anthropic_key:
+            reasoning = ai_reasoner.explain(result)
+            if reasoning:
+                storage.update_reasoning(record.id, reasoning)
 
     # Print a clean signal summary to the console
     _print_signal_table(signal_results)

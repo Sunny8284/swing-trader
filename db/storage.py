@@ -51,6 +51,7 @@ class SignalRecord(Base):
     bb_upper = Column(Float)
     bb_lower = Column(Float)
     reasons = Column(Text)   # pipe-separated list of reason strings
+    reasoning = Column(Text)  # Claude AI plain-English explanation
 
 
 class TradeRecord(Base):
@@ -86,6 +87,12 @@ class PortfolioSnapshot(Base):
 def init_db() -> None:
     """Create all tables if they don't exist yet."""
     Base.metadata.create_all(bind=engine)
+    # Migrate: add reasoning column if it doesn't exist yet
+    with engine.connect() as conn:
+        cols = [row[1] for row in conn.execute(text("PRAGMA table_info(signals)")).fetchall()]
+        if "reasoning" not in cols:
+            conn.execute(text("ALTER TABLE signals ADD COLUMN reasoning TEXT"))
+            conn.commit()
     logger.info("Database initialised at %s", config.DATABASE_URL)
 
 
@@ -112,6 +119,15 @@ def save_signal(result) -> SignalRecord:
         session.commit()
         session.refresh(record)
         return record
+
+
+def update_reasoning(signal_id: int, reasoning: str) -> None:
+    """Attach Claude's plain-English reasoning to an existing signal row."""
+    with SessionLocal() as session:
+        record = session.get(SignalRecord, signal_id)
+        if record:
+            record.reasoning = reasoning
+            session.commit()
 
 
 def save_trade(

@@ -179,6 +179,7 @@ def get_signals(limit: int = 100):
                 "bb_upper": r.bb_upper,
                 "bb_lower": r.bb_lower,
                 "reasons": r.reasons,
+                "reasoning": r.reasoning,
             }
             for r in records
         ]
