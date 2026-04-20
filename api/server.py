@@ -28,15 +28,16 @@ app = FastAPI(title="Swing Trader Dashboard API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
-    allow_methods=["GET"],
+    allow_methods=["GET", "OPTIONS"],
     allow_headers=["*"],
 )
 
 
 @app.middleware("http")
 async def api_key_guard(request: Request, call_next):
-    """Require X-API-Key header when DASHBOARD_API_KEY is set in env."""
-    if _API_KEY and request.url.path != "/api/health":
+    """Require X-API-Key header when DASHBOARD_API_KEY is set in env.
+    OPTIONS preflight requests are always allowed through for CORS to work."""
+    if _API_KEY and request.method != "OPTIONS" and request.url.path != "/api/health":
         key = request.headers.get("X-API-Key", "")
         if key != _API_KEY:
             raise HTTPException(status_code=401, detail="Invalid or missing API key")
