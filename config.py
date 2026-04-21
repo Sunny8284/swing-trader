@@ -70,16 +70,16 @@ BOLLINGER_STD: float = 2.0
 
 # Minimum number of bullish sub-signals required to issue a BUY.
 # Max is 4 (RSI + MACD + MA crossover + price vs BB).
-SIGNAL_BUY_THRESHOLD: int = 2
-SIGNAL_SELL_THRESHOLD: int = -2  # Minimum bearish score to issue SELL
+SIGNAL_BUY_THRESHOLD: int = 1
+SIGNAL_SELL_THRESHOLD: int = -1  # Minimum bearish score to issue SELL
 
 # ── Risk Management ────────────────────────────────────────────────────────────
 # Maximum fraction of portfolio to allocate to a single position.
 MAX_POSITION_PCT: float = 0.05      # 5% per position
 # Stop-loss below entry price.
-STOP_LOSS_PCT: float = 0.03         # 3% stop loss
+STOP_LOSS_PCT: float = 0.02         # 2% stop loss
 # Take-profit above entry price.
-TAKE_PROFIT_PCT: float = 0.08       # 8% take profit
+TAKE_PROFIT_PCT: float = 0.06       # 6% take profit
 # Minimum cash reserve — never deploy more than this fraction of portfolio.
 MIN_CASH_RESERVE_PCT: float = 0.20  # Keep 20% in cash at all times
 
