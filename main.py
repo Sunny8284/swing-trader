@@ -145,7 +145,7 @@ def start_api() -> None:
     import uvicorn
     logger.info("Starting API server on http://localhost:8000")
     logger.info("Docs available at http://localhost:8000/docs")
-    uvicorn.run("api.routes:app", host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run("api.server:app", host="0.0.0.0", port=8000, reload=False)
 
 
 # ── Status ─────────────────────────────────────────────────────────────────────
