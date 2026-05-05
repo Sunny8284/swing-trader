@@ -5,7 +5,7 @@ Exposes Alpaca trading data via REST endpoints for the Next.js frontend.
 """
 
 import os
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, timedelta
 import logging
@@ -17,6 +17,13 @@ from db import storage
 from db.storage import engine, SessionLocal, TradeRecord
 from sqlalchemy import text
 
+import config
+from data import fetcher
+from signals import generator
+from agent.trader import TradingAgent
+from agent import reasoner as ai_reasoner
+from agent import notifier
+
 logger = logging.getLogger(__name__)
 
 _API_KEY = os.getenv("DASHBOARD_API_KEY", "")  # empty = no auth (local dev)
@@ -24,6 +31,8 @@ _API_KEY = os.getenv("DASHBOARD_API_KEY", "")  # empty = no auth (local dev)
 ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "*").split(",")]
 
 app = FastAPI(title="Swing Trader Dashboard API", version="1.0.0")
+
+storage.init_db()
 
 app.add_middleware(
     CORSMiddleware,
@@ -292,6 +301,51 @@ def get_optimize(days: int = 365, refresh: bool = False):
     except Exception as e:
         logger.error(f"Optimization failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _do_cycle(watchlist: list[str]) -> None:
+    """Run a full trading cycle in the background. Used by /run."""
+    logger.info("Background cycle starting for: %s", watchlist)
+
+    ohlcv = fetcher.fetch_ohlcv(watchlist)
+    if not ohlcv:
+        logger.error("Failed to fetch market data — aborting cycle.")
+        return
+
+    signal_results = generator.generate_signals(ohlcv)
+
+    groq_key = os.environ.get("GROQ_API_KEY", "")
+    for result in signal_results:
+        record = storage.save_signal(result)
+        if groq_key:
+            reasoning = ai_reasoner.explain(result)
+            if reasoning:
+                storage.update_reasoning(record.id, reasoning)
+                result._reasoning = reasoning
+
+    agent = TradingAgent()
+    actions = agent.run_cycle(signal_results)
+
+    try:
+        acct = trading_client.get_account()
+        account_data = {
+            "portfolio_value": float(acct.portfolio_value or 0),
+            "cash": float(acct.cash or 0),
+        }
+    except Exception:
+        account_data = None
+    notifier.send_cycle_summary(signal_results, actions, account=account_data)
+    logger.info("Background cycle done — %d signals, %d actions.", len(signal_results), len(actions))
+
+
+@app.post("/run")
+def trigger_cycle(background_tasks: BackgroundTasks, tickers: list[str] | None = None):
+    """Trigger a full trading cycle. Returns immediately; cycle runs in the background.
+    Used by external schedulers (cron-job.org) — must respond well under 30s timeout."""
+    watchlist = tickers or config.WATCHLIST
+    logger.info("/run accepted for %d tickers — dispatching to background.", len(watchlist))
+    background_tasks.add_task(_do_cycle, watchlist)
+    return {"status": "accepted", "tickers": len(watchlist)}
 
 
 if __name__ == "__main__":

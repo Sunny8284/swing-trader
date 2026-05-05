@@ -16,8 +16,12 @@ import logging
 from typing import Optional
 
 from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import OrderSide, TimeInForce
-from alpaca.trading.requests import MarketOrderRequest
+from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
+from alpaca.trading.requests import (
+    MarketOrderRequest,
+    StopLossRequest,
+    TakeProfitRequest,
+)
 
 import config
 from db import storage
@@ -122,14 +126,23 @@ def execute_buy(ticker: str, price: float) -> Optional[dict]:
         logger.warning("Calculated qty < 1 for %s — skipping.", ticker)
         return None
 
-    logger.info("BUY %s: %d shares @ ~%.2f (total ≈ $%.0f)", ticker, qty, price, qty * price)
+    take_profit_price = round(price * (1 + config.TAKE_PROFIT_PCT), 2)
+    stop_loss_price = round(price * (1 - config.STOP_LOSS_PCT), 2)
+
+    logger.info(
+        "BUY %s: %d shares @ ~%.2f (total ≈ $%.0f) | TP %.2f / SL %.2f",
+        ticker, qty, price, qty * price, take_profit_price, stop_loss_price,
+    )
 
     client = _get_client()
     order_request = MarketOrderRequest(
         symbol=ticker,
         qty=qty,
         side=OrderSide.BUY,
-        time_in_force=TimeInForce.DAY,
+        time_in_force=TimeInForce.GTC,
+        order_class=OrderClass.BRACKET,
+        take_profit=TakeProfitRequest(limit_price=take_profit_price),
+        stop_loss=StopLossRequest(stop_price=stop_loss_price),
     )
 
     try:
@@ -173,17 +186,11 @@ def execute_sell(ticker: str, price: float) -> Optional[dict]:
         order = client.close_position(ticker)
         order_id = str(order.id)
 
-        storage.save_trade(
-            ticker=ticker,
-            side="sell",
-            qty=0,           # actual qty filled by Alpaca
-            entry_price=price,
-            order_id=order_id,
-            status="submitted",
-        )
+        # P&L tracking is handled by storage.close_trade() in trader.py
+        # — do not save a duplicate sell record here
 
         logger.info("SELL order submitted for %s — order_id=%s", ticker, order_id)
-        return {"ticker": ticker, "side": "sell", "order_id": order_id}
+        return {"ticker": ticker, "side": "sell", "order_id": order_id, "exit_price": price}
 
     except Exception as exc:
         logger.error("Failed to submit SELL order for %s: %s", ticker, exc)
