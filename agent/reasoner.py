@@ -5,9 +5,12 @@ Uses llama-3.1-8b-instant on Groq's free tier — fast (~200ms) and zero cost.
 """
 
 import os
+import time
 import logging
 
 from groq import Groq
+
+PACING_SECONDS = 1.0
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +51,8 @@ def explain(result) -> str:
         f"Ticker: {result.ticker}\n"
         f"Signal: {result.signal.value}  Score: {result.score:+d}\n"
         f"Price: ${result.price:.2f}  RSI: {result.rsi:.1f}\n"
-        f"SMA20: ${result.sma20:.2f}  SMA50: ${result.sma50:.2f}  SMA200: ${result.sma200:.2f}\n"
+        f"SMA20: ${result.sma20:.2f}  SMA50: ${result.sma50:.2f}"
+        + (f"  SMA200: ${result.sma200:.2f}" if result.sma200 is not None else "") + "\n"
         f"BB Upper: ${result.bb_upper:.2f}  BB Lower: ${result.bb_lower:.2f}\n"
         f"Reasons: {' | '.join(reasons)}\n\n"
         f"Explain this signal."
@@ -67,3 +71,5 @@ def explain(result) -> str:
     except Exception as e:
         logger.warning("Reasoner failed for %s: %s", result.ticker, e)
         return ""
+    finally:
+        time.sleep(PACING_SECONDS)
