@@ -70,12 +70,19 @@ def _compute_signals(df: pd.DataFrame, params: dict | None = None) -> pd.DataFra
     Compute daily BUY/SELL/HOLD signals for the entire DataFrame at once.
     All indicators are causal — no look-ahead bias.
     `params` overrides config values for optimizer sweeps.
+
+    Strategy enhancements (default off → preserves baseline behavior):
+      regime_aware_rsi (bool): when SMA20>SMA50>SMA200 (full bullish stack),
+        skip the RSI-overbought penalty. Symmetric for the bearish stack.
+        Lets the strategy participate in trending stocks (e.g. AMD-style runs)
+        instead of fighting the trend with mean-reversion.
     """
     p = params or {}
-    buy_threshold  = p.get("buy_threshold",  config.SIGNAL_BUY_THRESHOLD)
-    sell_threshold = p.get("sell_threshold", config.SIGNAL_SELL_THRESHOLD)
-    rsi_oversold   = p.get("rsi_oversold",   config.RSI_OVERSOLD)
-    rsi_overbought = p.get("rsi_overbought", config.RSI_OVERBOUGHT)
+    buy_threshold     = p.get("buy_threshold",     config.SIGNAL_BUY_THRESHOLD)
+    sell_threshold    = p.get("sell_threshold",    config.SIGNAL_SELL_THRESHOLD)
+    rsi_oversold      = p.get("rsi_oversold",      config.RSI_OVERSOLD)
+    rsi_overbought    = p.get("rsi_overbought",    config.RSI_OVERBOUGHT)
+    regime_aware_rsi  = p.get("regime_aware_rsi",  False)
 
     close = df["Close"].squeeze()
 
@@ -101,8 +108,16 @@ def _compute_signals(df: pd.DataFrame, params: dict | None = None) -> pd.DataFra
     bb_lo = bb.bollinger_lband()
 
     score = pd.Series(0, index=close.index, dtype=int)
-    score += (rsi < rsi_oversold).astype(int)
-    score -= (rsi > rsi_overbought).astype(int)
+
+    if regime_aware_rsi:
+        full_bull_stack = (sma20 > sma50) & (sma50 > sma200)
+        full_bear_stack = (sma20 < sma50) & (sma50 < sma200)
+        score += ((rsi < rsi_oversold) & ~full_bear_stack).astype(int)
+        score -= ((rsi > rsi_overbought) & ~full_bull_stack).astype(int)
+    else:
+        score += (rsi < rsi_oversold).astype(int)
+        score -= (rsi > rsi_overbought).astype(int)
+
     score += ((macd_prev <= sig_prev) & (macd_line > signal_line)).astype(int)
     score -= ((macd_prev >= sig_prev) & (macd_line < signal_line)).astype(int)
     score += (sma20 > sma50).astype(int)
@@ -189,10 +204,13 @@ def run(
     p             = params or {}
     stop_loss     = p.get("stop_loss_pct",   config.STOP_LOSS_PCT)
     take_profit   = p.get("take_profit_pct", config.TAKE_PROFIT_PCT)
+    cooldown_days = int(p.get("cooldown_days", 0))  # min days held before signal-SELL fires
+    reentry_cooldown_days = int(p.get("reentry_cooldown_days", 0))  # min days after exit before re-buying
 
     # Portfolio simulation
     capital   = initial_capital
     positions: dict[str, dict] = {}  # ticker → {qty, entry_price, entry_date}
+    last_exit: dict[str, "date"] = {}  # ticker → exit_date (for re-entry cooldown)
     trades: list[Trade] = []
     equity_curve = []
 
@@ -216,16 +234,20 @@ def run(
                 exit_reason = "take_profit"
                 price = pos["entry_price"] * (1 + take_profit)
             elif sig == "SELL":
-                exit_reason = "sell_signal"
+                today = dt.date() if hasattr(dt, "date") else dt
+                days_held = (today - pos["entry_date"]).days
+                if days_held >= cooldown_days:
+                    exit_reason = "sell_signal"
 
             if exit_reason:
                 proceeds = price * pos["qty"]
                 capital += proceeds
                 pnl = proceeds - pos["entry_price"] * pos["qty"]
+                exit_date = dt.date() if hasattr(dt, "date") else dt
                 trades.append(Trade(
                     ticker=ticker,
                     entry_date=pos["entry_date"],
-                    exit_date=dt.date() if hasattr(dt, "date") else dt,
+                    exit_date=exit_date,
                     entry_price=pos["entry_price"],
                     exit_price=price,
                     qty=pos["qty"],
@@ -233,6 +255,7 @@ def run(
                     pnl_pct=round(pnl_pct * 100, 2),
                     exit_reason=exit_reason,
                 ))
+                last_exit[ticker] = exit_date
                 del positions[ticker]
 
         # Check entries
@@ -241,6 +264,12 @@ def run(
                 continue
             if sig_df.loc[ts, "signal"] != "BUY":
                 continue
+
+            # Re-entry cooldown: block re-buying a recently-exited ticker
+            if reentry_cooldown_days > 0 and ticker in last_exit:
+                today = dt.date() if hasattr(dt, "date") else dt
+                if (today - last_exit[ticker]).days < reentry_cooldown_days:
+                    continue
 
             price          = float(sig_df.loc[ts, "price"])
             position_value = initial_capital * config.MAX_POSITION_PCT
@@ -366,9 +395,12 @@ def run_with_data(
     p           = params or {}
     stop_loss   = p.get("stop_loss_pct",   config.STOP_LOSS_PCT)
     take_profit = p.get("take_profit_pct", config.TAKE_PROFIT_PCT)
+    cooldown_days = int(p.get("cooldown_days", 0))
+    reentry_cooldown_days = int(p.get("reentry_cooldown_days", 0))
 
     capital   = initial_capital
     positions: dict[str, dict] = {}
+    last_exit: dict[str, "date"] = {}
     trades: list[Trade] = []
     equity_curve = []
 
@@ -391,16 +423,20 @@ def run_with_data(
                 exit_reason = "take_profit"
                 price = pos["entry_price"] * (1 + take_profit)
             elif sig == "SELL":
-                exit_reason = "sell_signal"
+                today = dt.date() if hasattr(dt, "date") else dt
+                days_held = (today - pos["entry_date"]).days
+                if days_held >= cooldown_days:
+                    exit_reason = "sell_signal"
 
             if exit_reason:
                 proceeds = price * pos["qty"]
                 capital += proceeds
                 pnl      = proceeds - pos["entry_price"] * pos["qty"]
+                exit_date = dt.date() if hasattr(dt, "date") else dt
                 trades.append(Trade(
                     ticker=ticker,
                     entry_date=pos["entry_date"],
-                    exit_date=dt.date() if hasattr(dt, "date") else dt,
+                    exit_date=exit_date,
                     entry_price=pos["entry_price"],
                     exit_price=price,
                     qty=pos["qty"],
@@ -408,6 +444,7 @@ def run_with_data(
                     pnl_pct=round(pnl_pct * 100, 2),
                     exit_reason=exit_reason,
                 ))
+                last_exit[ticker] = exit_date
                 del positions[ticker]
 
         for ticker, sig_df in signals.items():
@@ -415,6 +452,10 @@ def run_with_data(
                 continue
             if sig_df.loc[ts, "signal"] != "BUY":
                 continue
+            if reentry_cooldown_days > 0 and ticker in last_exit:
+                today = dt.date() if hasattr(dt, "date") else dt
+                if (today - last_exit[ticker]).days < reentry_cooldown_days:
+                    continue
             price          = float(sig_df.loc[ts, "price"])
             position_value = initial_capital * config.MAX_POSITION_PCT
             if capital - position_value < initial_capital * config.MIN_CASH_RESERVE_PCT:
