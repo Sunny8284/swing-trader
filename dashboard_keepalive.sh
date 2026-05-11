@@ -97,9 +97,32 @@ log "Triggering production redeploy..."
 "$VERCEL" --prod --yes 2>&1 | tail -20 >>"$KEEPALIVE_LOG"
 log "Vercel redeploy complete"
 
-# ── 5. Block until cloudflared dies, then exit non-zero so launchd restarts ──
-wait "$CF_PID"
-EXIT_CODE=$?
-log "cloudflared exited (code=$EXIT_CODE) — exiting so launchd respawns us"
-# Always exit 1 so launchd's KeepAlive triggers a restart even on clean exit
+# ── 5. Health-check loop while cloudflared runs ──────────────────────────────
+# cloudflared can be alive yet broken — when its QUIC control stream fails
+# (a sleep/wake glitch we hit repeatedly) it stays up in a retry loop and a
+# bare `wait $CF_PID` would block forever, silently leaving the dashboard
+# offline. Poll the public URL and force a respawn if it goes unhealthy.
+
+HEALTH_FAIL_THRESHOLD=3
+HEALTH_CHECK_INTERVAL=120
+HEALTH_FAILS=0
+
+while kill -0 "$CF_PID" 2>/dev/null; do
+    sleep "$HEALTH_CHECK_INTERVAL"
+    code=$(curl -s -m 15 -o /dev/null -w '%{http_code}' "$NEW_URL/api/health" 2>/dev/null || echo 000)
+    if [ "$code" = "200" ]; then
+        HEALTH_FAILS=0
+    else
+        HEALTH_FAILS=$((HEALTH_FAILS + 1))
+        log "Health check failed (HTTP $code, $HEALTH_FAILS/$HEALTH_FAIL_THRESHOLD)"
+        if [ "$HEALTH_FAILS" -ge "$HEALTH_FAIL_THRESHOLD" ]; then
+            log "Tunnel unhealthy — killing cloudflared so launchd respawns us"
+            kill "$CF_PID" 2>/dev/null || true
+            break
+        fi
+    fi
+done
+
+wait "$CF_PID" 2>/dev/null
+log "cloudflared exited — letting launchd respawn this script"
 exit 1
