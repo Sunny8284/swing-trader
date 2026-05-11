@@ -44,8 +44,9 @@ WATCHLIST: list[str] = [
     # ETFs (broad market exposure / hedging)
     "SPY",   # S&P 500 ETF
     "QQQ",   # Nasdaq-100 ETF
-    # Small-cap AI (high volatility — added 2026-05-11)
+    # Small-cap AI / quantum (high volatility ~5-6% daily — added 2026-05-11)
     "BBAI",  # BigBear.ai
+    "RGTI",  # Rigetti Computing
 ]
 
 # ── Data Fetching ──────────────────────────────────────────────────────────────
