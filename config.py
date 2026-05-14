@@ -73,20 +73,20 @@ BOLLINGER_STD: float = 2.0
 
 # Minimum number of bullish sub-signals required to issue a BUY.
 # Max is 4 (RSI + MACD + MA crossover + price vs BB).
-SIGNAL_BUY_THRESHOLD: int = 1
+SIGNAL_BUY_THRESHOLD: int = 2        # raised from 1 → fewer but higher-conviction buys
 SIGNAL_SELL_THRESHOLD: int = -1  # Minimum bearish score to issue SELL
 
 # ── Signal Filters ─────────────────────────────────────────────────────────────
 # Volume confirmation: only act on signals where volume > N-day average.
-VOLUME_CONFIRMATION: bool = False  # re-enable after May 16 walk-forward validation
+VOLUME_CONFIRMATION: bool = True
 VOLUME_MA_PERIOD: int = 20         # rolling average window
 VOLUME_MIN_RATIO: float = 1.0      # require at least 1.0× avg volume (i.e. above avg)
 
 # Earnings guard: skip BUY signals within this many days of earnings date.
-EARNINGS_GUARD_DAYS: int = 0  # re-enable (set to 2) after May 16 walk-forward validation
+EARNINGS_GUARD_DAYS: int = 2
 
 # VIX-based position sizing: reduce position size when market fear is elevated.
-VIX_SIZING: bool = False  # re-enable after May 16 walk-forward validation
+VIX_SIZING: bool = True
 VIX_HIGH_THRESHOLD: float = 25.0   # VIX above this → use reduced position size
 VIX_HIGH_POSITION_PCT: float = 0.025  # 2.5% per position when VIX is high (vs 5% normal)
 
@@ -94,9 +94,9 @@ VIX_HIGH_POSITION_PCT: float = 0.025  # 2.5% per position when VIX is high (vs 5
 # Maximum fraction of portfolio to allocate to a single position.
 MAX_POSITION_PCT: float = 0.05      # 5% per position
 # Stop-loss below entry price.
-STOP_LOSS_PCT: float = 0.02         # 2% stop loss
+STOP_LOSS_PCT: float = 0.015        # 1.5% stop loss (tightened from 2%)
 # Take-profit above entry price.
-TAKE_PROFIT_PCT: float = 0.06       # 6% take profit
+TAKE_PROFIT_PCT: float = 0.08       # 8% take profit (raised from 6%)
 # Minimum cash reserve — never deploy more than this fraction of portfolio.
 MIN_CASH_RESERVE_PCT: float = 0.20  # Keep 20% in cash at all times
 
