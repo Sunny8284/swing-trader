@@ -78,15 +78,15 @@ SIGNAL_SELL_THRESHOLD: int = -1  # Minimum bearish score to issue SELL
 
 # ── Signal Filters ─────────────────────────────────────────────────────────────
 # Volume confirmation: only act on signals where volume > N-day average.
-VOLUME_CONFIRMATION: bool = True
+VOLUME_CONFIRMATION: bool = False  # re-enable after May 16 walk-forward validation
 VOLUME_MA_PERIOD: int = 20         # rolling average window
 VOLUME_MIN_RATIO: float = 1.0      # require at least 1.0× avg volume (i.e. above avg)
 
 # Earnings guard: skip BUY signals within this many days of earnings date.
-EARNINGS_GUARD_DAYS: int = 2
+EARNINGS_GUARD_DAYS: int = 0  # re-enable (set to 2) after May 16 walk-forward validation
 
 # VIX-based position sizing: reduce position size when market fear is elevated.
-VIX_SIZING: bool = True
+VIX_SIZING: bool = False  # re-enable after May 16 walk-forward validation
 VIX_HIGH_THRESHOLD: float = 25.0   # VIX above this → use reduced position size
 VIX_HIGH_POSITION_PCT: float = 0.025  # 2.5% per position when VIX is high (vs 5% normal)
 
