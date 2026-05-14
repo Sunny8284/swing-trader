@@ -37,11 +37,13 @@ Sub-signals used
 
 import logging
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from enum import Enum
 from typing import Optional
 
 import pandas as pd
 import ta
+import yfinance as yf
 
 import config
 
@@ -183,9 +185,23 @@ def _analyze_ticker(ticker: str, df: pd.DataFrame) -> SignalResult:
         score -= 1
         reasons.append(f"Price {price:.2f} above BB upper {bb_upper:.2f}")
 
+    # ── Earnings Guard ─────────────────────────────────────────────────────────
+    near_earnings = _has_earnings_soon(ticker)
+
+    # ── Volume Confirmation ────────────────────────────────────────────────────
+    volume_ok = True
+    if config.VOLUME_CONFIRMATION:
+        volume = df["Volume"].squeeze()
+        vol_ma = float(volume.rolling(config.VOLUME_MA_PERIOD).mean().iloc[-1])
+        vol_today = float(volume.iloc[-1])
+        vol_ratio = vol_today / vol_ma if vol_ma > 0 else 1.0
+        if vol_ratio < config.VOLUME_MIN_RATIO:
+            volume_ok = False
+            reasons.append(f"Volume {vol_today:,.0f} below {config.VOLUME_MA_PERIOD}-day avg {vol_ma:,.0f} (ratio {vol_ratio:.2f}) — signal suppressed")
+
     # ── Trend Filter (SMA200) ──────────────────────────────────────────────────
     # Only allow BUY in uptrend, SELL in downtrend.
-    final_signal = _apply_trend_filter(score, price, sma200, reasons)
+    final_signal = _apply_trend_filter(score, price, sma200, reasons, volume_ok=volume_ok and not near_earnings)
 
     return SignalResult(
         ticker=ticker,
@@ -209,6 +225,7 @@ def _apply_trend_filter(
     price: float,
     sma200: Optional[float],
     reasons: list[str],
+    volume_ok: bool = True,
 ) -> Signal:
     """
     Apply the 200-day SMA trend filter and convert score to a Signal.
@@ -216,12 +233,17 @@ def _apply_trend_filter(
     Rule: Don't fight the macro trend.
     - If score says BUY but price < SMA200 → downgrade to HOLD.
     - If score says SELL but price > SMA200 → downgrade to HOLD.
+    - If volume confirmation failed → downgrade to HOLD.
     """
     if score >= config.SIGNAL_BUY_THRESHOLD:
         raw_signal = Signal.BUY
     elif score <= config.SIGNAL_SELL_THRESHOLD:
         raw_signal = Signal.SELL
     else:
+        return Signal.HOLD
+
+    # Volume confirmation — suppress signal on low volume
+    if not volume_ok:
         return Signal.HOLD
 
     # Apply trend filter only when SMA200 is available
@@ -239,3 +261,30 @@ def _apply_trend_filter(
             return Signal.HOLD
 
     return raw_signal
+
+
+def _has_earnings_soon(ticker: str) -> bool:
+    """Return True if the ticker has earnings within EARNINGS_GUARD_DAYS."""
+    if config.EARNINGS_GUARD_DAYS <= 0:
+        return False
+    try:
+        t = yf.Ticker(ticker)
+        cal = t.calendar
+        if cal is None or cal.empty:
+            return False
+        # calendar has columns like 'Earnings Date'; handle both dict and DataFrame
+        if hasattr(cal, 'columns'):
+            col = next((c for c in cal.columns if 'Earnings' in c), None)
+            if col is None:
+                return False
+            earnings_date = pd.to_datetime(cal[col].iloc[0]).date()
+        else:
+            earnings_date = pd.to_datetime(cal.get('Earnings Date', [None])[0]).date()
+        today = date.today()
+        days_away = (earnings_date - today).days
+        if 0 <= days_away <= config.EARNINGS_GUARD_DAYS:
+            logger.info("%s earnings in %d day(s) (%s) — suppressing BUY", ticker, days_away, earnings_date)
+            return True
+    except Exception:
+        pass
+    return False
