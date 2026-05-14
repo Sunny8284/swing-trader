@@ -76,6 +76,20 @@ BOLLINGER_STD: float = 2.0
 SIGNAL_BUY_THRESHOLD: int = 1
 SIGNAL_SELL_THRESHOLD: int = -1  # Minimum bearish score to issue SELL
 
+# ── Signal Filters ─────────────────────────────────────────────────────────────
+# Volume confirmation: only act on signals where volume > N-day average.
+VOLUME_CONFIRMATION: bool = True
+VOLUME_MA_PERIOD: int = 20         # rolling average window
+VOLUME_MIN_RATIO: float = 1.0      # require at least 1.0× avg volume (i.e. above avg)
+
+# Earnings guard: skip BUY signals within this many days of earnings date.
+EARNINGS_GUARD_DAYS: int = 2
+
+# VIX-based position sizing: reduce position size when market fear is elevated.
+VIX_SIZING: bool = True
+VIX_HIGH_THRESHOLD: float = 25.0   # VIX above this → use reduced position size
+VIX_HIGH_POSITION_PCT: float = 0.025  # 2.5% per position when VIX is high (vs 5% normal)
+
 # ── Risk Management ────────────────────────────────────────────────────────────
 # Maximum fraction of portfolio to allocate to a single position.
 MAX_POSITION_PCT: float = 0.05      # 5% per position

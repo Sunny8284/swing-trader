@@ -15,6 +15,7 @@ constraint that we never drop below MIN_CASH_RESERVE_PCT in cash.
 import logging
 from typing import Optional
 
+import yfinance as yf
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
 from alpaca.trading.requests import (
@@ -106,8 +107,22 @@ def execute_buy(ticker: str, price: float) -> Optional[dict]:
     equity = acct["equity"]
     cash = acct["cash"]
 
+    # VIX-based position sizing — trade smaller when market fear is elevated
+    position_pct = config.MAX_POSITION_PCT
+    if config.VIX_SIZING:
+        try:
+            vix_df = yf.download("^VIX", period="2d", progress=False, auto_adjust=True)
+            vix = float(vix_df["Close"].squeeze().iloc[-1])
+            if vix >= config.VIX_HIGH_THRESHOLD:
+                position_pct = config.VIX_HIGH_POSITION_PCT
+                logger.info("VIX=%.1f (≥%.0f) — using reduced position size %.0f%%", vix, config.VIX_HIGH_THRESHOLD, position_pct * 100)
+            else:
+                logger.debug("VIX=%.1f — normal position size %.0f%%", vix, position_pct * 100)
+        except Exception as exc:
+            logger.warning("Could not fetch VIX — using default position size: %s", exc)
+
     # How much cash we're willing to deploy for this position
-    max_spend = equity * config.MAX_POSITION_PCT
+    max_spend = equity * position_pct
     # Reserve buffer: keep at least MIN_CASH_RESERVE_PCT of equity in cash
     cash_reserve = equity * config.MIN_CASH_RESERVE_PCT
     available = max(0.0, cash - cash_reserve)
