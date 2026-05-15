@@ -17,13 +17,18 @@ def _send(text: str) -> None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN", _TOKEN)
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", _CHAT_ID)
     if not token or not chat_id:
+        logger.warning("Telegram not configured — token=%r chat_id=%r", bool(token), bool(chat_id))
         return
     try:
-        requests.post(
+        resp = requests.post(
             _API.format(token=token),
             json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
             timeout=10,
         )
+        if not resp.ok:
+            logger.warning("Telegram API error %s: %s", resp.status_code, resp.text[:200])
+        else:
+            logger.info("Telegram notification sent (HTTP %s)", resp.status_code)
     except Exception as e:
         logger.warning("Telegram notification failed: %s", e)
 
@@ -35,9 +40,6 @@ def send_cycle_summary(signal_results, actions, account=None) -> None:
     buys = [s for s in signal_results if s.signal.value == "BUY"]
     sells = [s for s in signal_results if s.signal.value == "SELL"]
     executed = [a for a in actions if a.action in ("BUY", "SELL")]
-
-    if not buys and not executed:
-        return  # nothing interesting — stay quiet
 
     lines = ["<b>🤖 Swing Trader — Cycle Complete</b>"]
 
@@ -69,6 +71,9 @@ def send_cycle_summary(signal_results, actions, account=None) -> None:
         lines.append("\n<b>📉 SELL Signals:</b>")
         for s in sorted(sells, key=lambda x: x.score):
             lines.append(f"• <b>{s.ticker}</b>  score {s.score:+d}  ${s.price:.2f}")
+
+    if not buys and not sells and not executed:
+        lines.append("\n⏸ All signals HOLD — no trades this cycle.")
 
     _send("\n".join(lines))
 
