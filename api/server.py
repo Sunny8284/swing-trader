@@ -142,15 +142,13 @@ def get_orders(limit: int = 50):
 def get_equity_curve(days: int = 30):
     """Portfolio history for charting."""
     try:
-        # Alpaca's get_portfolio_history uses start/end parameters, not period
         from datetime import datetime, timedelta
+        from alpaca.trading.requests import GetPortfolioHistoryRequest
         end = datetime.now()
         start = end - timedelta(days=days)
-        
+
         history = trading_client.get_portfolio_history(
-            start=start,
-            end=end,
-            timeframe="1D",
+            GetPortfolioHistoryRequest(start=start, end=end, timeframe="1D")
         )
         return {
             "timestamps": [datetime.fromtimestamp(ts).isoformat() for ts in history.timestamp] if history.timestamp else [],
