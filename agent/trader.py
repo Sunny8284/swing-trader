@@ -172,16 +172,19 @@ class TradingAgent:
             current_price = pos["current_price"]
             unrealized_pl = pos["unrealized_pl"]
 
+            # Update peak price and check trailing stop
+            peak_price = storage.update_peak_price(ticker, current_price)
+
             reason: Optional[str] = None
             if plpc <= -config.STOP_LOSS_PCT:
                 reason = (
                     f"Stop-loss triggered: {plpc*100:.1f}% "
                     f"(limit: -{config.STOP_LOSS_PCT*100:.0f}%)"
                 )
-            elif plpc >= config.TAKE_PROFIT_PCT:
+            elif peak_price and current_price <= peak_price * (1 - config.TRAILING_STOP_PCT):
                 reason = (
-                    f"Take-profit triggered: +{plpc*100:.1f}% "
-                    f"(target: +{config.TAKE_PROFIT_PCT*100:.0f}%)"
+                    f"Trailing stop triggered: price ${current_price:.2f} fell "
+                    f"{config.TRAILING_STOP_PCT*100:.0f}% below peak ${peak_price:.2f}"
                 )
 
             if reason:

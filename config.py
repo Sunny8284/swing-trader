@@ -106,10 +106,12 @@ VIX_HIGH_POSITION_PCT: float = 0.025  # 2.5% per position when VIX is high (vs 5
 # ── Risk Management ────────────────────────────────────────────────────────────
 # Maximum fraction of portfolio to allocate to a single position.
 MAX_POSITION_PCT: float = 0.08      # 8% per position (raised from 5%)
-# Stop-loss below entry price.
+# Stop-loss below entry price (hard floor on Alpaca bracket order).
 STOP_LOSS_PCT: float = 0.015        # 1.5% stop loss
-# Take-profit above entry price.
-TAKE_PROFIT_PCT: float = 0.08       # 8% take profit
+# Take-profit on Alpaca bracket — set high so bot-managed trailing stop fires first.
+TAKE_PROFIT_PCT: float = 0.50       # 50% ceiling (effectively disabled)
+# Trailing stop: sell if price falls this % below the position's peak price.
+TRAILING_STOP_PCT: float = 0.06     # 6% trail below peak
 # Minimum cash reserve — never deploy more than this fraction of portfolio.
 MIN_CASH_RESERVE_PCT: float = 0.10  # 10% cash reserve (reduced from 20%)
 
