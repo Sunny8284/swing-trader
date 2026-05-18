@@ -153,13 +153,22 @@ def _analyze_ticker(ticker: str, df: pd.DataFrame) -> SignalResult:
     score = 0
     reasons: list[str] = []
 
-    # RSI
+    # RSI (regime-aware: suppress signals that contradict the SMA trend stack)
+    full_bull = (sma20 > sma50) and (sma50 > (sma200 or 0))
+    full_bear = (sma20 < sma50) and (sma200 is not None) and (sma50 < sma200)
+
     if rsi < config.RSI_OVERSOLD:
-        score += 1
-        reasons.append(f"RSI={rsi:.1f} (oversold < {config.RSI_OVERSOLD})")
+        if config.REGIME_AWARE_RSI and full_bear:
+            reasons.append(f"RSI={rsi:.1f} oversold but full bear stack — RSI signal suppressed")
+        else:
+            score += 1
+            reasons.append(f"RSI={rsi:.1f} (oversold < {config.RSI_OVERSOLD})")
     elif rsi > config.RSI_OVERBOUGHT:
-        score -= 1
-        reasons.append(f"RSI={rsi:.1f} (overbought > {config.RSI_OVERBOUGHT})")
+        if config.REGIME_AWARE_RSI and full_bull:
+            reasons.append(f"RSI={rsi:.1f} overbought but full bull stack — RSI penalty suppressed")
+        else:
+            score -= 1
+            reasons.append(f"RSI={rsi:.1f} (overbought > {config.RSI_OVERBOUGHT})")
 
     # MACD crossover (bullish when MACD crosses above signal line)
     if macd_prev <= signal_prev and macd_line > signal_line:
