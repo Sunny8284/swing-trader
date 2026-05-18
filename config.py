@@ -105,13 +105,13 @@ VIX_HIGH_POSITION_PCT: float = 0.025  # 2.5% per position when VIX is high (vs 5
 
 # ── Risk Management ────────────────────────────────────────────────────────────
 # Maximum fraction of portfolio to allocate to a single position.
-MAX_POSITION_PCT: float = 0.05      # 5% per position
+MAX_POSITION_PCT: float = 0.08      # 8% per position (raised from 5%)
 # Stop-loss below entry price.
-STOP_LOSS_PCT: float = 0.015        # 1.5% stop loss (tightened from 2%)
+STOP_LOSS_PCT: float = 0.015        # 1.5% stop loss
 # Take-profit above entry price.
-TAKE_PROFIT_PCT: float = 0.08       # 8% take profit (raised from 6%)
+TAKE_PROFIT_PCT: float = 0.08       # 8% take profit
 # Minimum cash reserve — never deploy more than this fraction of portfolio.
-MIN_CASH_RESERVE_PCT: float = 0.20  # Keep 20% in cash at all times
+MIN_CASH_RESERVE_PCT: float = 0.10  # 10% cash reserve (reduced from 20%)
 
 # ── Scheduler ─────────────────────────────────────────────────────────────────
 # Cron expression for when to run the main trading loop.
