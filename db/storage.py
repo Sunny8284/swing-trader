@@ -65,6 +65,8 @@ class TradeRecord(Base):
     entry_price = Column(Float, nullable=False)
     order_id = Column(String(64))               # Alpaca order ID
     status = Column(String(20), default="submitted")
+    # Trailing stop tracking
+    peak_price = Column(Float)          # highest price seen since entry
     # Populated when position is closed
     exit_price = Column(Float)
     pnl = Column(Float)
@@ -87,11 +89,16 @@ class PortfolioSnapshot(Base):
 def init_db() -> None:
     """Create all tables if they don't exist yet."""
     Base.metadata.create_all(bind=engine)
-    # Migrate: add reasoning column if it doesn't exist yet
     with engine.connect() as conn:
-        cols = [row[1] for row in conn.execute(text("PRAGMA table_info(signals)")).fetchall()]
-        if "reasoning" not in cols:
+        # Migrate signals table
+        sig_cols = [row[1] for row in conn.execute(text("PRAGMA table_info(signals)")).fetchall()]
+        if "reasoning" not in sig_cols:
             conn.execute(text("ALTER TABLE signals ADD COLUMN reasoning TEXT"))
+            conn.commit()
+        # Migrate trades table
+        trade_cols = [row[1] for row in conn.execute(text("PRAGMA table_info(trades)")).fetchall()]
+        if "peak_price" not in trade_cols:
+            conn.execute(text("ALTER TABLE trades ADD COLUMN peak_price REAL"))
             conn.commit()
     logger.info("Database initialised at %s", config.DATABASE_URL)
 
@@ -153,6 +160,25 @@ def save_trade(
         session.refresh(record)
         logger.info("Trade saved: %s %s x%.2f @ %.2f", side.upper(), ticker, qty, entry_price)
         return record
+
+
+def update_peak_price(ticker: str, current_price: float) -> Optional[float]:
+    """Update peak_price for the open trade if current_price is a new high. Returns peak."""
+    with SessionLocal() as session:
+        record = (
+            session.query(TradeRecord)
+            .filter(TradeRecord.ticker == ticker, TradeRecord.side == "buy", TradeRecord.closed_at.is_(None))
+            .order_by(TradeRecord.created_at.desc())
+            .first()
+        )
+        if not record:
+            return None
+        peak = record.peak_price or record.entry_price
+        if current_price > peak:
+            record.peak_price = current_price
+            session.commit()
+            return current_price
+        return peak
 
 
 def close_trade(ticker: str, exit_price: float, pnl: float) -> None:
