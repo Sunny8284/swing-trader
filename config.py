@@ -47,6 +47,14 @@ WATCHLIST: list[str] = [
     # Small-cap AI / quantum (high volatility ~5-6% daily — added 2026-05-11)
     "BBAI",  # BigBear.ai
     "RGTI",  # Rigetti Computing
+    # V4 diversification additions (validated 2026-05-16)
+    "COP",   # ConocoPhillips
+    "LLY",   # Eli Lilly
+    "PFE",   # Pfizer
+    "COST",  # Costco
+    "WMT",   # Walmart
+    "HD",    # Home Depot
+    "CAT",   # Caterpillar
 ]
 
 # ── Data Fetching ──────────────────────────────────────────────────────────────
@@ -75,6 +83,11 @@ BOLLINGER_STD: float = 2.0
 # Max is 4 (RSI + MACD + MA crossover + price vs BB).
 SIGNAL_BUY_THRESHOLD: int = 2        # raised from 1 → fewer but higher-conviction buys
 SIGNAL_SELL_THRESHOLD: int = -1  # Minimum bearish score to issue SELL
+
+# Regime-aware RSI (V4): suppress RSI signals that contradict the SMA trend stack.
+# When SMA20>SMA50>SMA200 (full bull), ignore RSI overbought penalty.
+# When SMA20<SMA50<SMA200 (full bear), ignore RSI oversold bonus.
+REGIME_AWARE_RSI: bool = True
 
 # ── Signal Filters ─────────────────────────────────────────────────────────────
 # Volume confirmation: only act on signals where volume > N-day average.
