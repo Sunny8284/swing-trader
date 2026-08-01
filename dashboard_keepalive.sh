@@ -57,7 +57,10 @@ sleep 1
 # ── 3. Start cloudflared and capture its URL ──────────────────────────────────
 : > "$TUNNEL_LOG"
 log "Starting cloudflared..."
-"$CLOUDFLARED" tunnel --url http://localhost:8000 > "$TUNNEL_LOG" 2>&1 &
+# --protocol http2 forces TCP instead of the default QUIC/UDP, which some
+# networks block or throttle (symptom: tunnel registers but all requests
+# return HTTP 000 with "QUIC stream: timeout: no recent network activity").
+"$CLOUDFLARED" tunnel --protocol http2 --url http://localhost:8000 > "$TUNNEL_LOG" 2>&1 &
 CF_PID=$!
 
 NEW_URL=""
