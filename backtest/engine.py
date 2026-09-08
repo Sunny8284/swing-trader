@@ -370,7 +370,7 @@ def run(
             # the whole sleeve daily costs 2x slippage x 250 days a year, which
             # swamps the benefit entirely.
             total_idle = capital + park_shares * px
-            target_shares = max(0.0, (total_idle * 0.75) / px)
+            target_shares = max(0.0, (total_idle * p.get("park_target_pct", config.PARK_TARGET_PCT)) / px)
             delta = target_shares - park_shares
             # Ignore trivial adjustments; only rebalance on a meaningful drift.
             if abs(delta) * px > total_idle * 0.05:
