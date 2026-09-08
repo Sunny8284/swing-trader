@@ -189,3 +189,55 @@ def test_pending_check_fails_closed(monkeypatch):
 
     monkeypatch.setattr(trade_executor, "_get_client", lambda: Boom())
     assert trade_executor.has_pending_buy("COST") is True
+
+
+# ── Volatility-scaled stops ───────────────────────────────────────────────────
+
+def test_stop_falls_back_to_flat_when_atr_unavailable(monkeypatch):
+    def boom(*a, **kw):
+        raise Exception("yfinance down")
+    monkeypatch.setattr(trade_executor.yf, "download", boom)
+
+    import config
+    stop = trade_executor.stop_price_for("AAPL", 100.0)
+    expected_pct = max(config.ATR_STOP_MIN_PCT, config.STOP_LOSS_PCT)
+
+    assert stop == round(100.0 * (1 - expected_pct), 2)
+
+
+def test_stop_is_clamped_to_sane_bounds(monkeypatch):
+    """A data glitch must not produce a 90% stop."""
+    import config
+    import pandas as pd
+
+    idx = pd.date_range("2026-01-01", periods=60, freq="D")
+    insane = pd.DataFrame({
+        "High":  [200.0] * 60,
+        "Low":   [1.0] * 60,
+        "Close": [100.0] * 60,
+    }, index=idx)
+    monkeypatch.setattr(trade_executor.yf, "download", lambda *a, **kw: insane)
+
+    stop = trade_executor.stop_price_for("AAPL", 100.0)
+
+    assert stop == round(100.0 * (1 - config.ATR_STOP_MAX_PCT), 2)
+
+
+def test_more_volatile_name_gets_a_wider_stop(monkeypatch):
+    import pandas as pd
+
+    def frame(daily_range):
+        idx = pd.date_range("2026-01-01", periods=60, freq="D")
+        return pd.DataFrame({
+            "High":  [100.0 + daily_range / 2] * 60,
+            "Low":   [100.0 - daily_range / 2] * 60,
+            "Close": [100.0] * 60,
+        }, index=idx)
+
+    monkeypatch.setattr(trade_executor.yf, "download", lambda *a, **kw: frame(2.0))
+    calm = trade_executor.stop_price_for("COST", 100.0)
+
+    monkeypatch.setattr(trade_executor.yf, "download", lambda *a, **kw: frame(6.0))
+    wild = trade_executor.stop_price_for("NVDA", 100.0)
+
+    assert wild < calm, "the more volatile name must get more room, not less"

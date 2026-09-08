@@ -16,6 +16,7 @@ import logging
 from datetime import date
 from typing import Optional
 
+import pandas as pd
 import yfinance as yf
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderClass, OrderSide, QueryOrderStatus, TimeInForce
@@ -197,7 +198,7 @@ def execute_buy(ticker: str, price: float) -> Optional[dict]:
         logger.warning("Calculated qty < 1 for %s — skipping.", ticker)
         return None
 
-    stop_loss_price = round(price * (1 - config.STOP_LOSS_PCT), 2)
+    stop_loss_price = stop_price_for(ticker, price)
 
     logger.info(
         "BUY %s: %d shares @ ~%.2f (total ≈ $%.0f) | SL %.2f (trailing exit owned by agent)",
@@ -239,6 +240,48 @@ def execute_buy(ticker: str, price: float) -> Optional[dict]:
     except Exception as exc:
         logger.error("Failed to submit BUY order for %s: %s", ticker, exc)
         return None
+
+
+def stop_price_for(ticker: str, entry_price: float) -> float:
+    """
+    Stop for a new entry, scaled to how much `ticker` actually moves.
+
+    A flat percentage stop treats a 3%-a-day name (NVDA) and a 1.8%-a-day name
+    (COST) identically, which means it is either far too tight for one or too
+    loose for the other. At config.STOP_LOSS_PCT (1.5%) it was inside a single
+    day's normal range for every stock on the watchlist, so it fired on noise.
+
+    Falls back to the flat percentage if ATR cannot be computed, and is always
+    clamped to [ATR_STOP_MIN_PCT, ATR_STOP_MAX_PCT] so a data glitch cannot
+    produce an absurd stop.
+    """
+    stop_pct = config.STOP_LOSS_PCT
+    try:
+        bars = yf.download(
+            ticker, period="3mo", progress=False, auto_adjust=True, threads=False
+        )
+        if len(bars) > config.ATR_STOP_PERIOD:
+            high = bars["High"].squeeze()
+            low = bars["Low"].squeeze()
+            close = bars["Close"].squeeze()
+            prev_close = close.shift(1)
+            true_range = pd.concat([
+                high - low,
+                (high - prev_close).abs(),
+                (low - prev_close).abs(),
+            ], axis=1).max(axis=1)
+            atr = true_range.rolling(config.ATR_STOP_PERIOD).mean().iloc[-1]
+            atr_pct = float(atr) / float(close.iloc[-1])
+            if atr_pct > 0:
+                stop_pct = config.ATR_STOP_MULT * atr_pct
+        else:
+            logger.warning("Not enough bars for ATR on %s — using flat stop.", ticker)
+    except Exception as exc:
+        logger.warning("ATR lookup failed for %s (%s) — using flat stop.", ticker, exc)
+
+    stop_pct = max(config.ATR_STOP_MIN_PCT, min(config.ATR_STOP_MAX_PCT, stop_pct))
+    logger.info("%s stop width %.2f%% (%.1fx ATR)", ticker, stop_pct * 100, config.ATR_STOP_MULT)
+    return round(entry_price * (1 - stop_pct), 2)
 
 
 def cancel_open_orders(ticker: str) -> int:
