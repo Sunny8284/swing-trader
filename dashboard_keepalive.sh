@@ -110,14 +110,43 @@ HEALTH_FAIL_THRESHOLD=3
 HEALTH_CHECK_INTERVAL=120
 HEALTH_FAILS=0
 
+# Grace period: DNS for new quick-tunnel URLs can take 3-5 min to propagate.
+# Skip the first two check intervals (4 min) before counting failures.
+HEALTH_GRACE_CHECKS=2
+HEALTH_CHECKS_DONE=0
+
 while kill -0 "$CF_PID" 2>/dev/null; do
     sleep "$HEALTH_CHECK_INTERVAL"
-    code=$(curl -s -m 15 -o /dev/null -w '%{http_code}' "$NEW_URL/api/health" 2>/dev/null || echo 000)
+    HEALTH_CHECKS_DONE=$((HEALTH_CHECKS_DONE + 1))
+    code=$(curl -s -m 15 -o /dev/null -w '%{http_code}' "$NEW_URL/api/health" 2>/dev/null; echo "")
+    code=$(echo "$code" | tr -d '[:space:]')
+    [ -z "$code" ] && code="000"
     if [ "$code" = "200" ]; then
         HEALTH_FAILS=0
     else
-        HEALTH_FAILS=$((HEALTH_FAILS + 1))
-        log "Health check failed (HTTP $code, $HEALTH_FAILS/$HEALTH_FAIL_THRESHOLD)"
+        # The tunnel is only half the story: FastAPI can die underneath it
+        # (e.g. launchd kills the previous job's process group after a new
+        # instance already passed the step-1 port check). Revive the origin
+        # before blaming — and churning — the tunnel.
+        if ! lsof -nP -iTCP:8000 -sTCP:LISTEN >/dev/null 2>&1; then
+            log "Origin :8000 is down — restarting FastAPI"
+            cd "$PROJECT_DIR"
+            nohup "$VENV_PYTHON" main.py api >> "$API_LOG" 2>&1 &
+            disown
+            sleep 4
+            if lsof -nP -iTCP:8000 -sTCP:LISTEN >/dev/null 2>&1; then
+                log "FastAPI back up; tunnel left intact"
+                HEALTH_FAILS=0
+                continue
+            fi
+            log "ERROR: FastAPI restart failed; see $API_LOG"
+        fi
+        if [ "$HEALTH_CHECKS_DONE" -le "$HEALTH_GRACE_CHECKS" ]; then
+            log "Health check (HTTP $code) — in grace period ($HEALTH_CHECKS_DONE/$HEALTH_GRACE_CHECKS), not counting"
+        else
+            HEALTH_FAILS=$((HEALTH_FAILS + 1))
+            log "Health check failed (HTTP $code, $HEALTH_FAILS/$HEALTH_FAIL_THRESHOLD)"
+        fi
         if [ "$HEALTH_FAILS" -ge "$HEALTH_FAIL_THRESHOLD" ]; then
             log "Tunnel unhealthy — killing cloudflared so launchd respawns us"
             kill "$CF_PID" 2>/dev/null || true
