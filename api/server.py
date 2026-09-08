@@ -5,8 +5,10 @@ Exposes Alpaca trading data via REST endpoints for the Next.js frontend.
 """
 
 import os
-from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
+from dotenv import load_dotenv
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from datetime import datetime, timedelta
 import logging
 
@@ -17,14 +19,13 @@ from db import storage
 from db.storage import engine, SessionLocal, TradeRecord
 from sqlalchemy import text
 
-import config
-from data import fetcher
-from signals import generator
-from agent.trader import TradingAgent
-from agent import reasoner as ai_reasoner
-from agent import notifier
 
 logger = logging.getLogger(__name__)
+
+# Load .env explicitly. This module used to get it as a side effect of
+# importing config; without that, running server.py directly would leave
+# DASHBOARD_API_KEY unset and silently disable auth.
+load_dotenv()
 
 _API_KEY = os.getenv("DASHBOARD_API_KEY", "")  # empty = no auth (local dev)
 
@@ -49,7 +50,13 @@ async def api_key_guard(request: Request, call_next):
     if _API_KEY and request.method != "OPTIONS" and request.url.path != "/api/health":
         key = request.headers.get("X-API-Key", "")
         if key != _API_KEY:
-            raise HTTPException(status_code=401, detail="Invalid or missing API key")
+            # Must return, not raise: HTTPException raised inside ASGI
+            # middleware escapes FastAPI's handlers and surfaces as a 500
+            # with a traceback instead of a clean 401.
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Invalid or missing API key"},
+            )
     return await call_next(request)
 
 
@@ -303,51 +310,6 @@ def get_optimize(days: int = 365, refresh: bool = False):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _do_cycle(watchlist: list[str]) -> None:
-    """Run a full trading cycle in the background. Used by /run."""
-    logger.info("Background cycle starting for: %s", watchlist)
-
-    ohlcv = fetcher.fetch_ohlcv(watchlist)
-    if not ohlcv:
-        logger.error("Failed to fetch market data — aborting cycle.")
-        return
-
-    signal_results = generator.generate_signals(ohlcv)
-
-    groq_key = os.environ.get("GROQ_API_KEY", "")
-    for result in signal_results:
-        record = storage.save_signal(result)
-        if groq_key:
-            reasoning = ai_reasoner.explain(result)
-            if reasoning:
-                storage.update_reasoning(record.id, reasoning)
-                result._reasoning = reasoning
-
-    agent = TradingAgent()
-    actions = agent.run_cycle(signal_results)
-
-    try:
-        acct = trading_client.get_account()
-        account_data = {
-            "portfolio_value": float(acct.portfolio_value or 0),
-            "cash": float(acct.cash or 0),
-        }
-    except Exception:
-        account_data = None
-    notifier.send_cycle_summary(signal_results, actions, account=account_data)
-    logger.info("Background cycle done — %d signals, %d actions.", len(signal_results), len(actions))
-
-
-@app.post("/run")
-def trigger_cycle(background_tasks: BackgroundTasks, tickers: list[str] | None = None):
-    """Trigger a full trading cycle. Returns immediately; cycle runs in the background.
-    Used by external schedulers (cron-job.org) — must respond well under 30s timeout."""
-    watchlist = tickers or config.WATCHLIST
-    logger.info("/run accepted for %d tickers — dispatching to background.", len(watchlist))
-    background_tasks.add_task(_do_cycle, watchlist)
-    return {"status": "accepted", "tickers": len(watchlist)}
-
-
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(app, host="127.0.0.1", port=8000, reload=True)
