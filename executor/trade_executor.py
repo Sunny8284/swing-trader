@@ -17,11 +17,11 @@ from typing import Optional
 
 import yfinance as yf
 from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
+from alpaca.trading.enums import OrderClass, OrderSide, QueryOrderStatus, TimeInForce
 from alpaca.trading.requests import (
+    GetOrdersRequest,
     MarketOrderRequest,
     StopLossRequest,
-    TakeProfitRequest,
 )
 
 import config
@@ -141,12 +141,11 @@ def execute_buy(ticker: str, price: float) -> Optional[dict]:
         logger.warning("Calculated qty < 1 for %s — skipping.", ticker)
         return None
 
-    take_profit_price = round(price * (1 + config.TAKE_PROFIT_PCT), 2)
     stop_loss_price = round(price * (1 - config.STOP_LOSS_PCT), 2)
 
     logger.info(
-        "BUY %s: %d shares @ ~%.2f (total ≈ $%.0f) | TP %.2f / SL %.2f",
-        ticker, qty, price, qty * price, take_profit_price, stop_loss_price,
+        "BUY %s: %d shares @ ~%.2f (total ≈ $%.0f) | SL %.2f (trailing exit owned by agent)",
+        ticker, qty, price, qty * price, stop_loss_price,
     )
 
     client = _get_client()
@@ -155,8 +154,12 @@ def execute_buy(ticker: str, price: float) -> Optional[dict]:
         qty=qty,
         side=OrderSide.BUY,
         time_in_force=TimeInForce.GTC,
-        order_class=OrderClass.BRACKET,
-        take_profit=TakeProfitRequest(limit_price=take_profit_price),
+        # OTO, not BRACKET. A bracket also needs a take-profit leg, and since
+        # the trailing stop became the real profit exit, TAKE_PROFIT_PCT was set
+        # to 50% to neutralise it — leaving a resting sell limit far above the
+        # market on every position for the sole purpose of never filling. OTO
+        # attaches the protective stop and nothing else.
+        order_class=OrderClass.OTO,
         stop_loss=StopLossRequest(stop_price=stop_loss_price),
     )
 
@@ -182,6 +185,38 @@ def execute_buy(ticker: str, price: float) -> Optional[dict]:
         return None
 
 
+def cancel_open_orders(ticker: str) -> int:
+    """
+    Cancel every open order for `ticker`. Returns the number cancelled.
+
+    Exits are agent-driven (trailing stop), but each entry also leaves a
+    protective stop resting at the broker. Whenever we close a position
+    ourselves, that stop has to go with it.
+    """
+    client = _get_client()
+    try:
+        orders = client.get_orders(
+            GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[ticker])
+        )
+    except Exception as exc:
+        logger.error("Could not list open orders for %s: %s", ticker, exc)
+        return 0
+
+    cancelled = 0
+    for order in orders:
+        try:
+            client.cancel_order_by_id(order.id)
+            cancelled += 1
+            logger.info("Cancelled resting %s order %s for %s", order.order_type, order.id, ticker)
+        except Exception as exc:
+            # Already filled or cancelled is fine; anything else we want to see.
+            logger.warning("Could not cancel order %s for %s: %s", order.id, ticker, exc)
+
+    if cancelled:
+        logger.info("Cancelled %d resting order(s) for %s before selling.", cancelled, ticker)
+    return cancelled
+
+
 def execute_sell(ticker: str, price: float) -> Optional[dict]:
     """
     Close the entire position in `ticker` with a market SELL order.
@@ -195,6 +230,12 @@ def execute_sell(ticker: str, price: float) -> Optional[dict]:
     logger.info("SELL %s: liquidating position @ ~%.2f", ticker, price)
 
     client = _get_client()
+
+    # Cancel the protective stop FIRST. close_position() submits an independent
+    # market sell; it does not retire the stop attached at entry. Leaving that
+    # stop resting against a position we just liquidated means a later trigger
+    # sells shares we no longer own — i.e. opens an unintended short.
+    cancel_open_orders(ticker)
 
     try:
         # close_position liquidates all shares
