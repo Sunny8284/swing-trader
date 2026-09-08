@@ -115,6 +115,11 @@ TRAILING_STOP_PCT: float = 0.06     # 6% trail below peak
 # Minimum cash reserve — never deploy more than this fraction of portfolio.
 MIN_CASH_RESERVE_PCT: float = 0.10  # 10% cash reserve (reduced from 20%)
 
+# Round-trip execution cost assumed by the backtest, in basis points per side.
+# Live orders are market orders filling at the open; the backtest used to fill
+# at the signal bar's close with zero cost, which flattered every result.
+SLIPPAGE_BPS: float = float(os.getenv("SLIPPAGE_BPS", "5"))   # 0.05% per side
+
 # ── Scheduler ─────────────────────────────────────────────────────────────────
 # Cron expression for when to run the main trading loop.
 # Default: weekdays at 09:35 ET (5 minutes after market open).

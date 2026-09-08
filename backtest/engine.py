@@ -132,11 +132,25 @@ def _compute_signals(df: pd.DataFrame, params: dict | None = None) -> pd.DataFra
     sig[(sig == "BUY")  & (close <= sma200)] = "HOLD"
     sig[(sig == "SELL") & (close >= sma200)] = "HOLD"
 
+    # OHLC is carried through so the simulation can fill at the NEXT bar's open
+    # (what live actually does) and detect stops that gap through overnight.
+    high = df["High"].squeeze()
+    low  = df["Low"].squeeze()
+    open_ = df["Open"].squeeze()
+
+    atr = ta.volatility.AverageTrueRange(
+        high=high, low=low, close=close, window=14
+    ).average_true_range()
+
     return pd.DataFrame({
-        "price":  close,
-        "signal": sig,
-        "score":  score,
-        "sma200": sma200,
+        "price":   close,
+        "open":    open_,
+        "high":    high,
+        "low":     low,
+        "atr_pct": atr / close,
+        "signal":  sig,
+        "score":   score,
+        "sma200":  sma200,
     })
 
 
@@ -208,115 +222,156 @@ def run(
     reentry_cooldown_days = int(p.get("reentry_cooldown_days", 0))  # min days after exit before re-buying
 
     # Portfolio simulation
+    #
+    # Fill model mirrors live execution:
+    #   * A signal is computed from bar N's close, so it cannot fill until
+    #     bar N+1's OPEN. Filling at bar N's close (the old behaviour) is
+    #     look-ahead: it buys at a price only known after the decision.
+    #   * Both sides pay SLIPPAGE_BPS.
+    #   * Stops rest at the broker, so they trigger intraday on the same bar.
+    #     A gap through the stop fills at the open, not at the stop price.
+    #   * Size is a fraction of CURRENT equity, in whole shares.
+    slip          = config.SLIPPAGE_BPS / 10_000.0
+    atr_stop_mult = p.get("atr_stop_mult")   # None -> flat percentage stop
+
     capital   = initial_capital
-    positions: dict[str, dict] = {}  # ticker → {qty, entry_price, entry_date}
-    last_exit: dict[str, "date"] = {}  # ticker → exit_date (for re-entry cooldown)
+    positions: dict[str, dict] = {}
+    last_exit: dict[str, "date"] = {}
     trades: list[Trade] = []
     equity_curve = []
+    pending_buys: list[str] = []
+    pending_sells: list[str] = []
 
-    for dt in all_dates:
+    def _bar(ticker, ts):
+        df = signals.get(ticker)
+        if df is None or ts not in df.index:
+            return None
+        return df.loc[ts]
+
+    def _close_position(ticker, exit_price, exit_date, reason):
+        nonlocal capital
+        pos = positions.pop(ticker)
+        fill = exit_price * (1 - slip)
+        proceeds = fill * pos["qty"]
+        capital += proceeds
+        cost = pos["entry_price"] * pos["qty"]
+        trades.append(Trade(
+            ticker=ticker,
+            entry_date=pos["entry_date"],
+            exit_date=exit_date,
+            entry_price=pos["entry_price"],
+            exit_price=fill,
+            qty=pos["qty"],
+            pnl=round(proceeds - cost, 2),
+            pnl_pct=round((fill - pos["entry_price"]) / pos["entry_price"] * 100, 2),
+            exit_reason=reason,
+        ))
+        last_exit[ticker] = exit_date
+
+    for i, dt in enumerate(all_dates):
         ts = pd.Timestamp(dt)
+        today = dt.date() if hasattr(dt, "date") else dt
 
-        # Check exits first
-        for ticker in list(positions.keys()):
-            if ticker not in signals or ts not in signals[ticker].index:
+        # ── 1. Fill yesterday's decisions at today's open ─────────────────────
+        for ticker in pending_sells:
+            bar = _bar(ticker, ts)
+            if bar is None or ticker not in positions:
                 continue
-            pos   = positions[ticker]
-            price = float(signals[ticker].loc[ts, "price"])
-            pnl_pct = (price - pos["entry_price"]) / pos["entry_price"]
-            sig   = signals[ticker].loc[ts, "signal"]
+            _close_position(ticker, float(bar["open"]), today, "sell_signal")
+        pending_sells = []
 
-            exit_reason = None
-            if pnl_pct <= -stop_loss:
-                exit_reason = "stop_loss"
-                price = pos["entry_price"] * (1 - stop_loss)
-            elif pnl_pct >= take_profit:
-                exit_reason = "take_profit"
-                price = pos["entry_price"] * (1 + take_profit)
-            elif sig == "SELL":
-                today = dt.date() if hasattr(dt, "date") else dt
-                days_held = (today - pos["entry_date"]).days
-                if days_held >= cooldown_days:
-                    exit_reason = "sell_signal"
-
-            if exit_reason:
-                proceeds = price * pos["qty"]
-                capital += proceeds
-                pnl = proceeds - pos["entry_price"] * pos["qty"]
-                exit_date = dt.date() if hasattr(dt, "date") else dt
-                trades.append(Trade(
-                    ticker=ticker,
-                    entry_date=pos["entry_date"],
-                    exit_date=exit_date,
-                    entry_price=pos["entry_price"],
-                    exit_price=price,
-                    qty=pos["qty"],
-                    pnl=round(pnl, 2),
-                    pnl_pct=round(pnl_pct * 100, 2),
-                    exit_reason=exit_reason,
-                ))
-                last_exit[ticker] = exit_date
-                del positions[ticker]
-
-        # Check entries
-        for ticker, sig_df in signals.items():
-            if ticker in positions or ts not in sig_df.index:
+        for ticker in pending_buys:
+            bar = _bar(ticker, ts)
+            if bar is None or ticker in positions:
                 continue
-            if sig_df.loc[ts, "signal"] != "BUY":
+            fill = float(bar["open"]) * (1 + slip)
+
+            equity_now = capital + sum(
+                pos["qty"] * float(b["price"])
+                for t, pos in positions.items()
+                if (b := _bar(t, ts)) is not None
+            )
+            position_value = equity_now * config.MAX_POSITION_PCT
+            min_cash       = equity_now * config.MIN_CASH_RESERVE_PCT
+
+            qty = int(min(position_value, max(0.0, capital - min_cash)) / fill)
+            if qty < 1:
                 continue
 
-            # Re-entry cooldown: block re-buying a recently-exited ticker
-            if reentry_cooldown_days > 0 and ticker in last_exit:
-                today = dt.date() if hasattr(dt, "date") else dt
-                if (today - last_exit[ticker]).days < reentry_cooldown_days:
-                    continue
-
-            price          = float(sig_df.loc[ts, "price"])
-            position_value = initial_capital * config.MAX_POSITION_PCT
-            min_cash       = initial_capital * config.MIN_CASH_RESERVE_PCT
-
-            if capital - position_value < min_cash:
-                continue
-
-            qty      = position_value / price
-            capital -= position_value
+            capital -= qty * fill
+            atr_pct = float(bar["atr_pct"]) if pd.notna(bar["atr_pct"]) else stop_loss
+            stop_pct = atr_stop_mult * atr_pct if atr_stop_mult else stop_loss
             positions[ticker] = {
-                "qty":         qty,
-                "entry_price": price,
-                "entry_date":  dt.date() if hasattr(dt, "date") else dt,
+                "qty": qty,
+                "entry_price": fill,
+                "entry_date": today,
+                "stop_price": fill * (1 - stop_pct),
+                "peak": fill,
             }
+        pending_buys = []
 
-        # Mark-to-market equity
+        # ── 2. Broker stop: triggers intraday on this bar ─────────────────────
+        for ticker in list(positions.keys()):
+            bar = _bar(ticker, ts)
+            if bar is None:
+                continue
+            pos = positions[ticker]
+            stop = pos["stop_price"]
+            open_px, low_px = float(bar["open"]), float(bar["low"])
+            if open_px <= stop:
+                # Gapped through overnight — fill at the open, worse than the stop.
+                _close_position(ticker, open_px, today, "stop_gap")
+            elif low_px <= stop:
+                _close_position(ticker, stop, today, "stop_loss")
+
+        # ── 3. Evaluate today's close; anything it decides fills tomorrow ─────
+        if i + 1 < len(all_dates):
+            for ticker in list(positions.keys()):
+                bar = _bar(ticker, ts)
+                if bar is None:
+                    continue
+                pos = positions[ticker]
+                price = float(bar["price"])
+                pos["peak"] = max(pos["peak"], price)
+
+                pnl_pct = (price - pos["entry_price"]) / pos["entry_price"]
+                if pnl_pct >= take_profit:
+                    pending_sells.append(ticker)
+                    continue
+                if bar["signal"] == "SELL" and (today - pos["entry_date"]).days >= cooldown_days:
+                    pending_sells.append(ticker)
+
+            for ticker, sig_df in signals.items():
+                if ticker in positions or ticker in pending_buys or ts not in sig_df.index:
+                    continue
+                if sig_df.loc[ts, "signal"] != "BUY":
+                    continue
+                if reentry_cooldown_days > 0 and ticker in last_exit:
+                    if (today - last_exit[ticker]).days < reentry_cooldown_days:
+                        continue
+                pending_buys.append(ticker)
+
+        # ── 4. Mark to market ────────────────────────────────────────────────
         pos_value = sum(
-            positions[t]["qty"] * float(signals[t].loc[ts, "price"])
+            positions[t]["qty"] * float(b["price"])
             for t in positions
-            if t in signals and ts in signals[t].index
+            if (b := _bar(t, ts)) is not None
         )
         equity_curve.append({
             "date":   ts.strftime("%Y-%m-%d"),
             "equity": round(capital + pos_value, 2),
         })
 
-    # Close remaining open positions at last available price
-    for ticker, pos in positions.items():
-        sig_df    = signals[ticker]
-        last_ts   = sig_df.index[-1]
-        price     = float(sig_df.loc[last_ts, "price"])
-        proceeds  = price * pos["qty"]
-        capital  += proceeds
-        pnl       = proceeds - pos["entry_price"] * pos["qty"]
-        pnl_pct   = (price - pos["entry_price"]) / pos["entry_price"]
-        trades.append(Trade(
-            ticker=ticker,
-            entry_date=pos["entry_date"],
-            exit_date=last_ts.date() if hasattr(last_ts, "date") else last_ts,
-            entry_price=pos["entry_price"],
-            exit_price=price,
-            qty=pos["qty"],
-            pnl=round(pnl, 2),
-            pnl_pct=round(pnl_pct * 100, 2),
-            exit_reason="end_of_backtest",
-        ))
+    # Close remaining open positions at the last available close
+    for ticker in list(positions.keys()):
+        sig_df  = signals[ticker]
+        last_ts = sig_df.index[-1]
+        _close_position(
+            ticker,
+            float(sig_df.loc[last_ts, "price"]),
+            last_ts.date() if hasattr(last_ts, "date") else last_ts,
+            "end_of_backtest",
+        )
 
     # Metrics
     wins       = [t for t in trades if t.pnl > 0]
