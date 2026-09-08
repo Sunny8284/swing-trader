@@ -233,6 +233,18 @@ def run(
     #   * Size is a fraction of CURRENT equity, in whole shares.
     slip          = config.SLIPPAGE_BPS / 10_000.0
     atr_stop_mult = p.get("atr_stop_mult")   # None -> flat percentage stop
+    # Core-satellite: sweep idle cash into an index ETF instead of leaving it
+    # flat. The strategy holds ~4 names and sits ~50% in cash, which cannot
+    # keep up with a rising market no matter how good the stock picks are.
+    park_in       = p.get("park_idle_cash_in")   # e.g. "SPY"
+    park_px       = None
+    if park_in:
+        try:
+            park_px = signals[park_in]["price"]
+        except KeyError:
+            logger.warning("Cannot park cash in %s — no price data.", park_in)
+            park_in = None
+    park_shares = 0.0
 
     capital   = initial_capital
     positions: dict[str, dict] = {}
@@ -351,16 +363,38 @@ def run(
                         continue
                 pending_buys.append(ticker)
 
+        # ── 3b. Sweep idle cash into the parking ETF ─────────────────────────
+        if park_in and ts in park_px.index:
+            px = float(park_px.loc[ts])
+            # Trade only the DIFFERENCE to the target. Liquidating and re-buying
+            # the whole sleeve daily costs 2x slippage x 250 days a year, which
+            # swamps the benefit entirely.
+            total_idle = capital + park_shares * px
+            target_shares = max(0.0, (total_idle * 0.75) / px)
+            delta = target_shares - park_shares
+            # Ignore trivial adjustments; only rebalance on a meaningful drift.
+            if abs(delta) * px > total_idle * 0.05:
+                if delta > 0:
+                    capital -= delta * px * (1 + slip)
+                else:
+                    capital += -delta * px * (1 - slip)
+                park_shares = target_shares
+
         # ── 4. Mark to market ────────────────────────────────────────────────
         pos_value = sum(
             positions[t]["qty"] * float(b["price"])
             for t in positions
             if (b := _bar(t, ts)) is not None
         )
+        park_value = park_shares * float(park_px.loc[ts]) if (park_in and ts in park_px.index) else 0.0
         equity_curve.append({
             "date":   ts.strftime("%Y-%m-%d"),
-            "equity": round(capital + pos_value, 2),
+            "equity": round(capital + pos_value + park_value, 2),
         })
+
+    if park_in and park_shares:
+        capital += park_shares * float(park_px.iloc[-1]) * (1 - slip)
+        park_shares = 0.0
 
     # Close remaining open positions at the last available close
     for ticker in list(positions.keys()):
