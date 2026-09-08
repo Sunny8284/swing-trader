@@ -116,6 +116,16 @@ class TradingAgent:
                     reason="already have an open position",
                 )
 
+            # Guard: nor one we have already ordered but that has not filled.
+            # An unfilled order creates no position, so without this check
+            # consecutive cycles stack duplicate orders on the same signal.
+            if trade_executor.has_pending_buy(ticker):
+                return AgentAction(
+                    ticker=ticker,
+                    action="SKIPPED",
+                    reason="unfilled BUY order already pending",
+                )
+
             order = trade_executor.execute_buy(ticker=ticker, price=price)
             if order:
                 return AgentAction(

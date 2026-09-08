@@ -13,12 +13,14 @@ constraint that we never drop below MIN_CASH_RESERVE_PCT in cash.
 """
 
 import logging
+from datetime import date
 from typing import Optional
 
 import yfinance as yf
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderClass, OrderSide, QueryOrderStatus, TimeInForce
 from alpaca.trading.requests import (
+    GetCalendarRequest,
     GetOrdersRequest,
     MarketOrderRequest,
     StopLossRequest,
@@ -75,6 +77,60 @@ def get_positions() -> list[dict]:
         }
         for p in positions
     ]
+
+
+def is_trading_day(day: Optional[date] = None) -> bool:
+    """
+    Return True if `day` (default today) is a session on the US market calendar.
+
+    Weekday checks are not enough: Labor Day 2026-09-07 was a Monday, the
+    scheduler fired all three cycles into a closed market, and every resulting
+    order queued unfilled overnight. We ask Alpaca for the calendar rather than
+    hardcoding a holiday list.
+
+    Fails CLOSED — if the calendar cannot be reached we report "not a trading
+    day" and skip the cycle, because the cost of skipping a session is far
+    lower than the cost of trading blind into a closed one.
+    """
+    day = day or date.today()
+    client = _get_client()
+    try:
+        sessions = client.get_calendar(GetCalendarRequest(start=day, end=day))
+    except Exception as exc:
+        logger.error("Could not fetch market calendar for %s: %s — treating as closed.", day, exc)
+        return False
+
+    open_today = any(s.date == day for s in sessions)
+    if not open_today:
+        logger.info("%s is not a trading session (weekend or market holiday).", day)
+    return open_today
+
+
+def has_pending_buy(ticker: str) -> bool:
+    """
+    Return True if an unfilled BUY order for `ticker` is already resting.
+
+    has_position() alone is not a sufficient duplicate guard. An order that has
+    not filled yet creates no position, so consecutive cycles each see "no
+    position" and stack another order — which is exactly how one COST signal
+    became three orders and a 24% position. Sell orders are ignored: entries
+    now attach a protective stop, and that leg must not block a re-entry.
+    """
+    client = _get_client()
+    try:
+        orders = client.get_orders(
+            GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[ticker])
+        )
+    except Exception as exc:
+        # Fail closed: unsure means do not add another order.
+        logger.error("Could not check pending orders for %s: %s — assuming one exists.", ticker, exc)
+        return True
+
+    for order in orders:
+        if order.side == OrderSide.BUY:
+            logger.info("Pending unfilled BUY already resting for %s (order %s).", ticker, order.id)
+            return True
+    return False
 
 
 def has_position(ticker: str) -> bool:

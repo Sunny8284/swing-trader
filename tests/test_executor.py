@@ -104,3 +104,88 @@ def test_cancel_survives_a_failing_cancel(monkeypatch):
 
     assert cancelled == 1
     assert ("cancel", "good") in client.calls
+
+
+# ── Duplicate-order and market-calendar guards ────────────────────────────────
+#
+# Regression cover for 2026-09-07 (Labor Day): the scheduler fired three cycles
+# into a closed market, stale quotes regenerated the same COST BUY each time,
+# and because the orders queued unfilled there was never a position to block the
+# next one. Three orders filled at the following open — a 24% position against
+# an 8% target.
+
+from datetime import date
+
+from alpaca.trading.enums import OrderSide
+
+
+class FakeSession:
+    def __init__(self, d):
+        self.date = d
+
+
+class CalendarClient:
+    def __init__(self, sessions=None, raises=False):
+        self._sessions = sessions or []
+        self._raises = raises
+
+    def get_calendar(self, req):
+        if self._raises:
+            raise Exception("calendar unavailable")
+        return list(self._sessions)
+
+
+def test_open_session_is_a_trading_day(monkeypatch):
+    day = date(2026, 9, 8)
+    monkeypatch.setattr(trade_executor, "_get_client",
+                        lambda: CalendarClient([FakeSession(day)]))
+    assert trade_executor.is_trading_day(day) is True
+
+
+def test_holiday_is_not_a_trading_day(monkeypatch):
+    """Labor Day is a Monday — a weekday check alone would have passed it."""
+    monkeypatch.setattr(trade_executor, "_get_client", lambda: CalendarClient([]))
+    assert trade_executor.is_trading_day(date(2026, 9, 7)) is False
+
+
+def test_calendar_failure_fails_closed(monkeypatch):
+    """Unreachable calendar must skip the cycle, not trade blind."""
+    monkeypatch.setattr(trade_executor, "_get_client",
+                        lambda: CalendarClient(raises=True))
+    assert trade_executor.is_trading_day(date(2026, 9, 8)) is False
+
+
+class OrderSideClient(FakeClient):
+    def get_orders(self, filter=None):
+        self.calls.append(("get_orders", None))
+        return list(self._open_orders)
+
+
+def _order(oid, symbol, side):
+    o = FakeOrder(oid, symbol)
+    o.side = side
+    return o
+
+
+def test_pending_buy_blocks_a_duplicate(monkeypatch):
+    client = OrderSideClient(open_orders=[_order("buy-1", "COST", OrderSide.BUY)])
+    monkeypatch.setattr(trade_executor, "_get_client", lambda: client)
+    assert trade_executor.has_pending_buy("COST") is True
+
+
+def test_resting_stop_does_not_block_reentry(monkeypatch):
+    """Entries attach a protective stop; that SELL leg must not look like a
+    pending entry, or we could never re-enter a name we still hold a stop on."""
+    client = OrderSideClient(open_orders=[_order("stop-1", "COST", OrderSide.SELL)])
+    monkeypatch.setattr(trade_executor, "_get_client", lambda: client)
+    assert trade_executor.has_pending_buy("COST") is False
+
+
+def test_pending_check_fails_closed(monkeypatch):
+    """If we cannot tell, assume an order exists rather than stacking another."""
+    class Boom(FakeClient):
+        def get_orders(self, filter=None):
+            raise Exception("api down")
+
+    monkeypatch.setattr(trade_executor, "_get_client", lambda: Boom())
+    assert trade_executor.has_pending_buy("COST") is True

@@ -22,6 +22,7 @@ from db import storage
 from data import fetcher
 from signals import generator
 from agent.trader import TradingAgent
+from executor import trade_executor
 from agent import reasoner as ai_reasoner
 from agent import notifier
 
@@ -52,6 +53,14 @@ def run_trading_cycle(watchlist: list[str] | None = None) -> None:
     """
     watchlist = watchlist or config.WATCHLIST
     logger.info("=" * 60)
+
+    # Nothing below this line is safe on a closed market: quotes go stale, so
+    # the same signal regenerates every cycle, and orders queue unfilled so the
+    # duplicate guards see no position. Check the calendar before anything else.
+    if not trade_executor.is_trading_day():
+        logger.info("Market closed today — skipping cycle.")
+        return
+
     logger.info("Trading cycle starting for %d tickers.", len(watchlist))
     logger.info("Watchlist: %s", watchlist)
 
