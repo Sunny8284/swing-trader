@@ -102,6 +102,17 @@ class TradingAgent:
         signal = result.signal
         price = result.price
 
+        # The cash sleeve is a passive core managed by rebalance_cash_sleeve().
+        # It is also on the watchlist, so without this the strategy would trade
+        # against its own sleeve — buying it on a signal, then trailing-stopping
+        # it out from under the rebalancer.
+        if config.PARK_IDLE_CASH_IN and ticker == config.PARK_IDLE_CASH_IN:
+            return AgentAction(
+                ticker=ticker,
+                action="SKIPPED",
+                reason="cash-sleeve holding — not traded by the strategy",
+            )
+
         # ── HOLD: nothing to do ───────────────────────────────────────────────
         if signal == Signal.HOLD:
             return AgentAction(ticker=ticker, action="HOLD", reason="signal is HOLD")
@@ -178,6 +189,10 @@ class TradingAgent:
 
         for pos in positions:
             ticker = pos["ticker"]
+
+            # Never stop out the passive sleeve.
+            if config.PARK_IDLE_CASH_IN and ticker == config.PARK_IDLE_CASH_IN:
+                continue
             plpc = pos["unrealized_plpc"]   # raw decimal from Alpaca, e.g. 0.089
             current_price = pos["current_price"]
             unrealized_pl = pos["unrealized_pl"]

@@ -148,6 +148,22 @@ SCHEDULE_CRON: dict = {
 # change, and run `client.models.list()` to see what the key can currently reach.
 GROQ_MODEL: str = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
 
+# ── Cash sleeve (core-satellite) ──────────────────────────────────────────────
+# The strategy holds ~4 names and leaves ~50% of the account idle, which cannot
+# keep up with a rising market however good the picks are. Park idle cash in an
+# index ETF so uninvested capital still earns the market.
+#
+# PARK_TARGET_PCT is the dial between the two strategies. Backtested returns:
+#            75%      90%     100%     SPY
+#   180d  +11.79%  +15.49%  +16.80%  +16.91%
+#   365d  +15.71%  +17.45%  +19.63%  +19.74%
+#   730d  +53.61%  +47.73%  +44.17%  +44.29%
+# Higher = closer to simply holding SPY. Lower = more exposure to the swing
+# strategy, which beat SPY over 730 days and trailed it over 180 and 365.
+PARK_IDLE_CASH_IN: str = os.getenv("PARK_IDLE_CASH_IN", "SPY")
+PARK_TARGET_PCT: float = float(os.getenv("PARK_TARGET_PCT", "0.75"))
+PARK_DRIFT_PCT: float = 0.05   # only rebalance past this drift, to avoid churn
+
 DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///swing_trader.db")
 
 # ── Logging ────────────────────────────────────────────────────────────────────

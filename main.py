@@ -98,6 +98,14 @@ def run_trading_cycle(watchlist: list[str] | None = None) -> None:
     logger.info("Step 4/4 — Logging results...")
     _print_action_summary(actions)
 
+    # Sweep whatever the strategy did not deploy into the index sleeve, so idle
+    # cash earns the market instead of nothing. Runs after entries and exits so
+    # it sees the true post-cycle cash balance.
+    try:
+        trade_executor.rebalance_cash_sleeve()
+    except Exception as exc:
+        logger.error("Cash sleeve rebalance failed: %s", exc)
+
     try:
         from api.alpaca_client import trading_client
         acct = trading_client.get_account()

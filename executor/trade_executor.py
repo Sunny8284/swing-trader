@@ -284,6 +284,75 @@ def stop_price_for(ticker: str, entry_price: float) -> float:
     return round(entry_price * (1 - stop_pct), 2)
 
 
+def rebalance_cash_sleeve() -> Optional[dict]:
+    """
+    Hold config.PARK_TARGET_PCT of idle cash in config.PARK_IDLE_CASH_IN.
+
+    Idle cash is the drag that kept this account at +2% while SPY made +16.9%.
+    The sleeve is a passive core: plain market orders, no stop, no trailing
+    exit. The swing strategy runs on top of it.
+
+    Rebalances only past PARK_DRIFT_PCT of drift — a daily round-trip on the
+    whole sleeve costs two-way slippage 250 times a year, which in backtest
+    turned +18.9% into +2.6%.
+    """
+    park = config.PARK_IDLE_CASH_IN
+    if not park:
+        return None
+
+    client = _get_client()
+    try:
+        acct = client.get_account()
+        cash = float(acct.cash or 0)
+        positions = {p.symbol: p for p in client.get_all_positions()}
+    except Exception as exc:
+        logger.error("Cash sleeve: could not read account: %s", exc)
+        return None
+
+    held = positions.get(park)
+    held_value = float(held.market_value) if held else 0.0
+    price = float(held.current_price) if held else _last_price(park)
+    if not price:
+        logger.error("Cash sleeve: no price for %s — skipping.", park)
+        return None
+
+    idle = cash + held_value
+    target_value = idle * config.PARK_TARGET_PCT
+    delta_value = target_value - held_value
+
+    if abs(delta_value) < idle * config.PARK_DRIFT_PCT:
+        logger.info("Cash sleeve: %s within drift band — no action.", park)
+        return None
+
+    qty = int(abs(delta_value) / price)
+    if qty < 1:
+        return None
+
+    side = OrderSide.BUY if delta_value > 0 else OrderSide.SELL
+    logger.info(
+        "Cash sleeve: %s %d %s (held $%.0f -> target $%.0f of $%.0f idle)",
+        side.value.upper(), qty, park, held_value, target_value, idle,
+    )
+    try:
+        order = client.submit_order(order_data=MarketOrderRequest(
+            symbol=park, qty=qty, side=side,
+            time_in_force=TimeInForce.DAY,
+            order_class=OrderClass.SIMPLE,
+        ))
+        return {"ticker": park, "side": side.value, "qty": qty, "order_id": str(order.id)}
+    except Exception as exc:
+        logger.error("Cash sleeve: %s order failed: %s", park, exc)
+        return None
+
+
+def _last_price(ticker: str) -> float:
+    try:
+        bars = yf.download(ticker, period="5d", progress=False, auto_adjust=True, threads=False)
+        return float(bars["Close"].squeeze().iloc[-1])
+    except Exception:
+        return 0.0
+
+
 def cancel_open_orders(ticker: str) -> int:
     """
     Cancel every open order for `ticker`. Returns the number cancelled.
