@@ -89,10 +89,39 @@ fi
 
 log "New tunnel URL: $NEW_URL"
 
-# Health check before bothering Vercel
-sleep 3
-if ! curl -s -m 10 -o /dev/null -w "%{http_code}" "$NEW_URL/api/health" | grep -q '^200$'; then
-    log "WARN: tunnel up but /api/health didn't return 200; updating Vercel anyway"
+# ── 3b. Wait for the URL to actually be reachable ────────────────────────────
+# A fresh quick-tunnel hostname is NOT live the moment cloudflared prints it —
+# cloudflared says so itself ("it may take some time to be reachable"), and in
+# practice it takes 1-5 minutes. The old code checked once after 3 seconds,
+# logged a warning, and published to Vercel regardless. That guaranteed a
+# window where production pointed at a hostname that did not resolve yet, and
+# it is what put the dashboard offline this morning.
+#
+# Publish only what we have proven works. If it never comes up, do NOT touch
+# Vercel — leave production pointing at the last URL that did work, and exit so
+# launchd respawns us with a fresh tunnel.
+URL_WAIT_SECONDS=360
+URL_POLL_INTERVAL=10
+url_live=0
+waited=0
+while [ "$waited" -lt "$URL_WAIT_SECONDS" ]; do
+    if [ "$(curl -s -m 15 -o /dev/null -w '%{http_code}' "$NEW_URL/api/health" 2>/dev/null)" = "200" ]; then
+        url_live=1
+        log "Tunnel reachable after ${waited}s"
+        break
+    fi
+    if ! kill -0 "$CF_PID" 2>/dev/null; then
+        log "ERROR: cloudflared died while waiting for URL to go live"
+        exit 1
+    fi
+    sleep "$URL_POLL_INTERVAL"
+    waited=$((waited + URL_POLL_INTERVAL))
+done
+
+if [ "$url_live" -ne 1 ]; then
+    log "ERROR: $NEW_URL never returned 200 after ${URL_WAIT_SECONDS}s — not publishing it"
+    kill "$CF_PID" 2>/dev/null || true
+    exit 1
 fi
 
 # ── 4. Update Vercel env and redeploy production ──────────────────────────────
@@ -115,17 +144,40 @@ HEALTH_FAIL_THRESHOLD=3
 HEALTH_CHECK_INTERVAL=120
 HEALTH_FAILS=0
 
-# Grace period: DNS for new quick-tunnel URLs can take 3-5 min to propagate.
-# Skip the first two check intervals (4 min) before counting failures.
-HEALTH_GRACE_CHECKS=2
-HEALTH_CHECKS_DONE=0
+# No DNS grace period is needed any more: step 3b already proved this URL
+# serves 200 before we published it, so a failure here is a real regression
+# rather than a hostname that has not warmed up yet.
+#
+# But this Mac sleeps, and `sleep 120` sleeps with it — the logs show "2 minute"
+# checks landing 15-40 minutes apart. A check straight out of suspend runs
+# before Wi-Fi has reassociated, fails for reasons that say nothing about the
+# tunnel, and used to count toward tearing it down. Detect the time warp and
+# re-test after the network settles instead of counting it.
+SLEEP_SKEW_TOLERANCE=60
+NETWORK_SETTLE_SECONDS=20
 
-while kill -0 "$CF_PID" 2>/dev/null; do
-    sleep "$HEALTH_CHECK_INTERVAL"
-    HEALTH_CHECKS_DONE=$((HEALTH_CHECKS_DONE + 1))
-    code=$(curl -s -m 15 -o /dev/null -w '%{http_code}' "$NEW_URL/api/health" 2>/dev/null; echo "")
+check_health() {
+    local code
+    code=$(curl -s -m 15 -o /dev/null -w '%{http_code}' "$NEW_URL/api/health" 2>/dev/null || echo 000)
     code=$(echo "$code" | tr -d '[:space:]')
     [ -z "$code" ] && code="000"
+    echo "$code"
+}
+
+while kill -0 "$CF_PID" 2>/dev/null; do
+    before=$(date +%s)
+    sleep "$HEALTH_CHECK_INTERVAL"
+    elapsed=$(( $(date +%s) - before ))
+    code=$(check_health)
+
+    # Woke from suspend: give the network a moment, then re-test once. Only the
+    # retry's verdict counts.
+    if [ "$code" != "200" ] && [ "$elapsed" -gt $((HEALTH_CHECK_INTERVAL + SLEEP_SKEW_TOLERANCE)) ]; then
+        log "Woke after ${elapsed}s asleep (expected ${HEALTH_CHECK_INTERVAL}s) — re-testing in ${NETWORK_SETTLE_SECONDS}s"
+        sleep "$NETWORK_SETTLE_SECONDS"
+        code=$(check_health)
+    fi
+
     if [ "$code" = "200" ]; then
         HEALTH_FAILS=0
     else
@@ -146,12 +198,8 @@ while kill -0 "$CF_PID" 2>/dev/null; do
             fi
             log "ERROR: FastAPI restart failed; see $API_LOG"
         fi
-        if [ "$HEALTH_CHECKS_DONE" -le "$HEALTH_GRACE_CHECKS" ]; then
-            log "Health check (HTTP $code) — in grace period ($HEALTH_CHECKS_DONE/$HEALTH_GRACE_CHECKS), not counting"
-        else
-            HEALTH_FAILS=$((HEALTH_FAILS + 1))
-            log "Health check failed (HTTP $code, $HEALTH_FAILS/$HEALTH_FAIL_THRESHOLD)"
-        fi
+        HEALTH_FAILS=$((HEALTH_FAILS + 1))
+        log "Health check failed (HTTP $code, $HEALTH_FAILS/$HEALTH_FAIL_THRESHOLD)"
         if [ "$HEALTH_FAILS" -ge "$HEALTH_FAIL_THRESHOLD" ]; then
             log "Tunnel unhealthy — killing cloudflared so launchd respawns us"
             kill "$CF_PID" 2>/dev/null || true
