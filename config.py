@@ -125,6 +125,13 @@ SCHEDULE_CRON: dict = {
 }
 
 # ── Database ───────────────────────────────────────────────────────────────────
+# ── AI reasoning (Groq) ───────────────────────────────────────────────────────
+# Groq retires hosted models without notice: llama-3.1-8b-instant vanished and
+# every reasoning call 404'd for months, silently, because failures are caught
+# and logged as warnings. Keep the model name here so replacing it is a one-line
+# change, and run `client.models.list()` to see what the key can currently reach.
+GROQ_MODEL: str = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
+
 DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///swing_trader.db")
 
 # ── Logging ────────────────────────────────────────────────────────────────────

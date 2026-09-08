@@ -1,7 +1,8 @@
 """
 agent/reasoner.py — Groq AI plain-English reasoning for trade signals.
 
-Uses llama-3.1-8b-instant on Groq's free tier — fast (~200ms) and zero cost.
+Model name lives in config.GROQ_MODEL. Groq retires hosted models without
+notice, so treat it as configuration, not a constant.
 """
 
 import os
@@ -10,11 +11,19 @@ import logging
 
 from groq import Groq
 
+import config
+
 PACING_SECONDS = 1.0
 
 logger = logging.getLogger(__name__)
 
 _client: Groq | None = None
+
+# Set once the configured model is known to be unreachable. A bad model name
+# fails identically for every ticker, and the old code retried all 27 of them
+# each cycle — 27 log lines and 27 seconds of pacing sleep to accomplish
+# nothing. Stop after the first definitive failure.
+_model_unavailable = False
 
 
 def _get_client() -> Groq | None:
@@ -41,8 +50,10 @@ def explain(result) -> str:
     Call Groq to generate a plain-English explanation for a signal result.
     Returns the explanation string, or empty string on failure / no key set.
     """
+    global _model_unavailable
+
     client = _get_client()
-    if client is None:
+    if client is None or _model_unavailable:
         return ""
 
     reasons = result.reasons if isinstance(result.reasons, list) else []
@@ -60,8 +71,9 @@ def explain(result) -> str:
 
     try:
         response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            max_tokens=200,
+            model=config.GROQ_MODEL,
+            # 200 was cutting explanations off mid-sentence.
+            max_tokens=320,
             messages=[
                 {"role": "system", "content": _SYSTEM},
                 {"role": "user", "content": user_msg},
@@ -69,7 +81,19 @@ def explain(result) -> str:
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
-        logger.warning("Reasoner failed for %s: %s", result.ticker, e)
+        # A missing model is a configuration fault, not a transient blip: it
+        # will fail for every ticker of every cycle until someone changes it.
+        # Log it as an error and stop retrying, so it cannot rot unnoticed
+        # behind a wall of per-ticker warnings.
+        if "model_not_found" in str(e) or "does not exist" in str(e):
+            _model_unavailable = True
+            logger.error(
+                "Groq model %r is unavailable — AI reasoning disabled for this run. "
+                "Set GROQ_MODEL in .env to a model your key can reach.",
+                config.GROQ_MODEL,
+            )
+        else:
+            logger.warning("Reasoner failed for %s: %s", result.ticker, e)
         return ""
     finally:
         time.sleep(PACING_SECONDS)
