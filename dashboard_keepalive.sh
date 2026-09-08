@@ -65,7 +65,12 @@ CF_PID=$!
 
 NEW_URL=""
 for _ in $(seq 1 30); do
-    NEW_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' "$TUNNEL_LOG" | head -1)
+    # Only the banner URL counts. When tunnel creation FAILS, cloudflared logs
+    # its own control-plane endpoint (https://api.trycloudflare.com) in the
+    # error, and a bare grep happily captured that and shipped it to Vercel as
+    # the public API URL — a guaranteed-dead dashboard. Exclude that host.
+    NEW_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' "$TUNNEL_LOG" \
+              | grep -v '^https://api\.trycloudflare\.com$' | head -1)
     if [ -n "$NEW_URL" ]; then
         break
     fi
